@@ -1,2 +1,43 @@
-# Phase 0 placeholder. Sensitive path matching starts in Phase 1.
+[[rule]]
+glob = "/etc/shadow"
+severity = "high"
 
+[[rule]]
+glob = "/etc/sudoers"
+severity = "high"
+
+[[rule]]
+glob = "/etc/sudoers.d/**"
+severity = "high"
+
+[[rule]]
+glob = "/root/**"
+severity = "high"
+
+[[rule]]
+glob = "/home/*/.ssh/id_*"
+severity = "high"
+
+[[rule]]
+glob = "/home/*/.aws/credentials"
+severity = "high"
+
+[[rule]]
+glob = "/home/*/.config/gcloud/credentials*"
+severity = "high"
+
+[[rule]]
+glob = "/home/*/.netrc"
+severity = "high"
+
+[[rule]]
+glob = "/home/*/.bash_history"
+severity = "medium"
+
+[[rule]]
+glob = "/home/*/.zsh_history"
+severity = "medium"
+
+[[rule]]
+glob = "/etc/passwd"
+severity = "low"

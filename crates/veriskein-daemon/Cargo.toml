@@ -20,6 +20,9 @@ tracing-subscriber.workspace = true
 veriskein-alert = { path = "../veriskein-alert" }
 veriskein-bpf = { path = "../veriskein-bpf" }
 veriskein-collector = { path = "../veriskein-collector" }
+veriskein-detectors = { path = "../veriskein-detectors" }
+veriskein-graph = { path = "../veriskein-graph" }
+veriskein-normalizer = { path = "../veriskein-normalizer" }
 veriskein-proto = { path = "../veriskein-proto" }
 
 [dev-dependencies]

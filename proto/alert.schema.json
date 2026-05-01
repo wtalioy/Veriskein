@@ -6,41 +6,51 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
+    "alert_id",
+    "ts_ns",
     "type",
     "severity",
     "confidence_band",
-    "timestamp",
-    "process",
-    "session",
-    "evidence",
+    "confidence_score",
+    "pid",
+    "tid",
+    "session_id",
+    "summary",
+    "reason_code",
     "objects",
-    "fallback"
+    "evidence",
+    "fallback",
+    "policy"
   ],
   "properties": {
     "schema_version": { "type": "integer", "minimum": 1 },
-    "type": { "type": "string", "minLength": 1 },
+    "alert_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "ts_ns": { "type": "integer", "minimum": 0 },
+    "type": {
+      "enum": [
+        "exec_observed",
+        "unexpected_shell",
+        "sensitive_file_access",
+        "out_of_workspace_deletion"
+      ]
+    },
     "severity": { "enum": ["low", "medium", "high", "critical"] },
     "confidence_band": { "enum": ["weak", "medium", "strong"] },
-    "timestamp": { "type": "string", "format": "date-time" },
-    "process": {
+    "confidence_score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "pid": { "type": "integer", "minimum": 0 },
+    "tid": { "type": "integer", "minimum": 0 },
+    "session_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "agent_id": { "type": ["string", "null"], "pattern": "^[0-9a-f]{32}$|^$" },
+    "summary": { "type": "string", "maxLength": 512 },
+    "reason_code": { "type": "string", "maxLength": 64 },
+    "objects": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["pid", "tgid", "tid", "comm", "binary"],
+      "required": ["paths", "event_ids", "argv"],
       "properties": {
-        "pid": { "type": "integer", "minimum": 0 },
-        "tgid": { "type": "integer", "minimum": 0 },
-        "tid": { "type": "integer", "minimum": 0 },
-        "comm": { "type": "string" },
-        "binary": { "type": "string" }
-      }
-    },
-    "session": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["session_id", "workspace"],
-      "properties": {
-        "session_id": { "type": "string", "minLength": 1 },
-        "workspace": { "type": "string", "minLength": 1 }
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "event_ids": { "type": "array", "items": { "type": "string" } },
+        "argv": { "type": "array", "items": { "type": "string" } }
       }
     },
     "evidence": {
@@ -51,21 +61,13 @@
         "additionalProperties": false,
         "required": ["kind", "event_id", "ingest_seq"],
         "properties": {
-          "kind": { "type": "string", "minLength": 1 },
+          "kind": {
+            "enum": ["syscall", "file_access", "net_connect", "prompt_ref", "heuristic"]
+          },
           "event_id": { "type": "string", "minLength": 1 },
-          "ingest_seq": { "type": "integer", "minimum": 0 }
-        }
-      }
-    },
-    "objects": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["event_kind", "argv"],
-      "properties": {
-        "event_kind": { "type": "string", "minLength": 1 },
-        "argv": {
-          "type": "array",
-          "items": { "type": "string" }
+          "ingest_seq": { "type": "integer", "minimum": 0 },
+          "path": { "type": ["string", "null"] },
+          "note": { "type": ["string", "null"] }
         }
       }
     },
@@ -77,7 +79,15 @@
         "mode": { "enum": ["none", "degraded", "capture_disabled", "prompt_evidence_unavailable"] },
         "visibility": { "enum": ["full", "partial", "unsupported", "unavailable"] }
       }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detector_version", "policy_version"],
+      "properties": {
+        "detector_version": { "type": "integer", "minimum": 1 },
+        "policy_version": { "type": "integer", "minimum": 1 }
+      }
     }
   }
 }
-

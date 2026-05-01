@@ -1,5 +1,4 @@
-//! Phase 0 daemon entrypoint, preflight checks, and dry-run alert loop.
-//! This crate owns process lifecycle and output wiring, not event semantics.
+//! Phase 1 daemon entrypoint and runtime orchestration.
 
 mod driver;
 mod enrich;
@@ -8,7 +7,7 @@ mod preflight;
 
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::Parser;
 use tracing::error;
 
@@ -17,7 +16,7 @@ pub use preflight::{PreflightError, check_btf_path, check_kernel_release, prefli
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "veriskein-daemon")]
-#[command(about = "Phase 0 Veriskein daemon")]
+#[command(about = "Veriskein daemon")]
 pub struct Cli {
     #[arg(long = "workspace", value_name = "PATH")]
     pub workspaces: Vec<PathBuf>,
@@ -38,12 +37,6 @@ pub fn install_tracing() {
 pub async fn main_entry() -> Result<()> {
     install_tracing();
     let cli = Cli::parse();
-    // Phase 0 intentionally exposes only the dry-run path while the rest of the
-    // runtime surface is still being built out.
-    if !cli.dry_run {
-        bail!("only --dry-run is implemented in Phase 0");
-    }
-
     if let Err(err) = run(cli).await {
         if let Some(preflight) = err.downcast_ref::<PreflightError>() {
             error!("{preflight}");

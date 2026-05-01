@@ -1,3 +1,16 @@
-# Phase 0 placeholder. Later phases will add binary seeds and heuristics.
 default_workspace = ""
 
+binary_seeds = [
+  "claude",
+  "claude-code",
+  "gemini",
+  "gemini-cli",
+  "aider",
+  "codex"
+]
+
+shell_allowlist = []
+sensitive_allowlist = []
+delete_allowlist = [
+  "/run/**"
+]

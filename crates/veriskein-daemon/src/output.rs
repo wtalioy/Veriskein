@@ -2,22 +2,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use veriskein_alert::{AlertRecord, stdout_sink};
-use veriskein_proto::OwnedEvent;
-
-pub fn event_to_alert(
-    event: &OwnedEvent,
-    ingest_seq: u64,
-    workspace: &str,
-) -> Result<Option<AlertRecord>> {
-    let timestamp = format_timestamp(event)?;
-    Ok(AlertRecord::from_exec_event(
-        event, ingest_seq, workspace, timestamp,
-    ))
-}
+use anyhow::{Context, Result};
+use veriskein_alert::stdout_sink;
 
 pub fn open_sink(path: Option<&Path>) -> Result<Box<dyn Write + Send>> {
     match path {
@@ -28,14 +14,6 @@ pub fn open_sink(path: Option<&Path>) -> Result<Box<dyn Write + Send>> {
         }
         None => Ok(stdout_sink()),
     }
-}
-
-fn format_timestamp(event: &OwnedEvent) -> Result<String> {
-    let nanos = i128::from(event.header().ts_ns);
-    let dt = OffsetDateTime::from_unix_timestamp_nanos(nanos)
-        .map_err(|err| anyhow!("invalid event timestamp: {err}"))?;
-    dt.format(&Rfc3339)
-        .map_err(|err| anyhow!("format RFC3339 timestamp: {err}"))
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use caps::{CapSet, Capability};
+use veriskein_graph::AgentConfig;
 
 use crate::Cli;
 
@@ -30,7 +31,15 @@ pub fn preflight(cli: &Cli) -> Result<(), PreflightError> {
     check_btf_path(Path::new("/sys/kernel/btf/vmlinux"))?;
     ensure_memlock_limit().map_err(|_| PreflightError::Memlock)?;
     ensure_capabilities()?;
-    ensure_workspace_configured(&cli.workspaces)?;
+    let config_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or(PreflightError::MissingWorkspace)?;
+    let default_workspace = AgentConfig::load(&config_root.join("config/agents.toml"))
+        .ok()
+        .map(|config| config.default_workspace)
+        .filter(|path| !path.is_empty());
+    ensure_workspace_configured(&cli.workspaces, default_workspace.as_deref())?;
     Ok(())
 }
 
@@ -57,8 +66,11 @@ pub fn check_btf_path(path: &Path) -> Result<(), PreflightError> {
     Ok(())
 }
 
-pub fn ensure_workspace_configured(workspaces: &[PathBuf]) -> Result<(), PreflightError> {
-    if workspaces.is_empty() {
+pub fn ensure_workspace_configured(
+    workspaces: &[PathBuf],
+    default_workspace: Option<&str>,
+) -> Result<(), PreflightError> {
+    if workspaces.is_empty() && default_workspace.is_none() {
         return Err(PreflightError::MissingWorkspace);
     }
     Ok(())
@@ -143,7 +155,12 @@ mod tests {
 
     #[test]
     fn preflight_requires_workspace() {
-        let err = ensure_workspace_configured(&[]).expect_err("workspace is required");
+        let err = ensure_workspace_configured(&[], None).expect_err("workspace is required");
         assert!(matches!(err, PreflightError::MissingWorkspace));
+    }
+
+    #[test]
+    fn preflight_accepts_default_workspace() {
+        ensure_workspace_configured(&[], Some("/tmp/ws")).expect("default workspace accepted");
     }
 }

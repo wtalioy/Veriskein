@@ -4,7 +4,8 @@ use veriskein_proto::{OwnedEvent, OwnedProcExecEvent};
 
 pub fn enrich_event_from_procfs(event: &mut OwnedEvent) {
     if let OwnedEvent::ProcExec(exec) = event {
-        if let Some(snapshot) = ProcfsExecSnapshot::read(exec.tgid) {
+        let pid = exec.header.pid;
+        if let Some(snapshot) = ProcfsExecSnapshot::read(pid) {
             apply_procfs_snapshot(exec, snapshot);
         }
     }
@@ -65,11 +66,6 @@ mod tests {
     fn procfs_snapshot_applies_real_exec_details() {
         let mut event = veriskein_proto::OwnedProcExecEvent {
             header: EventHeader::default(),
-            pid: 1,
-            tgid: 1,
-            ppid: 0,
-            mount_ns: 0,
-            comm: "bash".to_string(),
             filename: "bash".to_string(),
             argv: vec!["bash".to_string()],
         };

@@ -10,26 +10,24 @@ fn main() -> Result<()> {
         .parent()
         .and_then(|path| path.parent())
         .expect("crate is nested under repo root");
-    let source = repo_root.join("bpf/proc.bpf.c");
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let obj = out_dir.join("proc.bpf.o");
-    let skel = out_dir.join("proc.skel.rs");
-
-    println!("cargo:rerun-if-changed={}", source.display());
     println!(
         "cargo:rerun-if-changed={}",
         repo_root.join("bpf/vmlinux.h").display()
     );
 
-    // Build and generate the skeleton from the repo-root BPF source so the Rust
-    // crate can ship a compiled object plus bindings without manual sync work.
-    let mut builder = SkeletonBuilder::new();
-    builder.source(&source).obj(&obj).clang_args([
-        format!("-I{}", repo_root.join("bpf").display()),
-        "-Wno-compare-distinct-pointer-types".to_string(),
-    ]);
-    builder.build()?;
-    builder.generate(&skel)?;
+    for stem in ["proc", "fs", "net"] {
+        let source = repo_root.join(format!("bpf/{stem}.bpf.c"));
+        let obj = out_dir.join(format!("{stem}.bpf.o"));
+        println!("cargo:rerun-if-changed={}", source.display());
+
+        let mut builder = SkeletonBuilder::new();
+        builder.source(&source).obj(&obj).clang_args([
+            format!("-I{}", repo_root.join("bpf").display()),
+            "-Wno-compare-distinct-pointer-types".to_string(),
+        ]);
+        builder.build()?;
+    }
 
     Ok(())
 }
