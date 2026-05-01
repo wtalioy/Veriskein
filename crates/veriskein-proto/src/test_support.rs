@@ -1,7 +1,7 @@
 use crate::{
     DropReason, EventHeader, EventKind, FdDupEvent, FileOpenEvent, FileRenameEvent,
-    FileUnlinkEvent, MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent,
-    ProcExitEvent, ProcForkEvent, defaults,
+    FileUnlinkEvent, MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent, ProcExitEvent,
+    ProcForkEvent, defaults,
 };
 
 pub fn build_proc_fork_event_bytes(
@@ -56,7 +56,16 @@ pub fn build_proc_exit_event_bytes(
     exit_code: i32,
 ) -> Vec<u8> {
     let event = ProcExitEvent {
-        header: base_header(cpu, seq, EventKind::ProcExit, pid, tid, ppid, comm, exit_code),
+        header: base_header(
+            cpu,
+            seq,
+            EventKind::ProcExit,
+            pid,
+            tid,
+            ppid,
+            comm,
+            exit_code,
+        ),
         exit_code,
         _pad: 0,
     };
@@ -140,7 +149,16 @@ pub fn build_file_unlink_event_bytes(
     path: &str,
 ) -> Vec<u8> {
     let mut event = FileUnlinkEvent {
-        header: base_header(cpu, seq, EventKind::FileUnlink, pid, tid, ppid, comm, unlink_ret),
+        header: base_header(
+            cpu,
+            seq,
+            EventKind::FileUnlink,
+            pid,
+            tid,
+            ppid,
+            comm,
+            unlink_ret,
+        ),
         dirfd,
         unlink_ret,
         flags: 0,
@@ -165,7 +183,16 @@ pub fn build_file_rename_event_bytes(
     new_path: &str,
 ) -> Vec<u8> {
     let mut event = FileRenameEvent {
-        header: base_header(cpu, seq, EventKind::FileRename, pid, tid, ppid, comm, rename_ret),
+        header: base_header(
+            cpu,
+            seq,
+            EventKind::FileRename,
+            pid,
+            tid,
+            ppid,
+            comm,
+            rename_ret,
+        ),
         olddirfd,
         newdirfd,
         rename_ret,

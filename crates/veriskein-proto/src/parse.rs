@@ -1,9 +1,9 @@
 use thiserror::Error;
 
 use crate::{
-    EventHeader, EventKind, EventRef, FdDupEvent, FileOpenEvent, FileRenameEvent,
-    FileUnlinkEvent, MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent,
-    ProcExitEvent, ProcForkEvent, defaults,
+    EventHeader, EventKind, EventRef, FdDupEvent, FileOpenEvent, FileRenameEvent, FileUnlinkEvent,
+    MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent, ProcExitEvent, ProcForkEvent,
+    defaults,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -98,8 +98,16 @@ mod tests {
 
     #[test]
     fn parse_exec_roundtrip() {
-        let raw =
-            build_exec_event_bytes(3, 7, 4242, 4242, 1, "bash", "/bin/bash", &["bash", "-lc", "true"]);
+        let raw = build_exec_event_bytes(
+            3,
+            7,
+            4242,
+            4242,
+            1,
+            "bash",
+            "/bin/bash",
+            &["bash", "-lc", "true"],
+        );
         let parsed = parse(&raw).expect("exec event should parse");
         match parsed {
             EventRef::ProcExec(evt) => {
@@ -131,7 +139,8 @@ mod tests {
 
     #[test]
     fn parse_file_open_roundtrip() {
-        let raw = build_file_open_event_bytes(0, 2, 200, 200, 1, "python3", -100, 3, "/tmp/demo.txt");
+        let raw =
+            build_file_open_event_bytes(0, 2, 200, 200, 1, "python3", -100, 3, "/tmp/demo.txt");
         match parse(&raw).expect("open should parse").to_owned() {
             OwnedEvent::FileOpen(evt) => {
                 assert_eq!(evt.ret_fd, 3);

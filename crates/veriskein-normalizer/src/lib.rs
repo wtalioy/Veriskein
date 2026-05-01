@@ -3,8 +3,10 @@
 mod config;
 mod state;
 
-pub use config::{GlobList, SensitiveConfig, SensitiveRule, WorkspaceRef, lexical_clean, load_workspaces};
+pub use config::{
+    GlobList, SensitiveConfig, SensitiveRule, WorkspaceRef, lexical_clean, load_workspaces,
+};
 pub use state::{
-    NormalizedData, NormalizedEvent, Normalizer, PathContext, PathResolution,
-    PathResolutionMode, PathVerdict, ProcessSnapshot,
+    NormalizedData, NormalizedEvent, Normalizer, PathContext, PathResolution, PathResolutionMode,
+    PathVerdict, ProcessSnapshot,
 };

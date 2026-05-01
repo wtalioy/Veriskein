@@ -20,7 +20,9 @@ pub struct MatchSpec {
 
 pub fn assert_expectations(expectations: &[Expectation], actual: &[Value]) -> Result<()> {
     for expectation in expectations {
-        let found = actual.iter().any(|value| value["type"] == expectation.match_.alert_type);
+        let found = actual
+            .iter()
+            .any(|value| value["type"] == expectation.match_.alert_type);
         if expectation.negate && found {
             bail!("unexpected alert type {}", expectation.match_.alert_type);
         }

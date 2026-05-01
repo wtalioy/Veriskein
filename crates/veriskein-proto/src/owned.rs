@@ -144,10 +144,7 @@ impl OwnedEvent {
         let seq = header.seq;
         let ts_ns = header.ts_ns;
         let kind = header.kind;
-        let seed = format!(
-            "{}:{}:{}:{}:{}",
-            pid, tid, seq, ts_ns, kind
-        );
+        let seed = format!("{}:{}:{}:{}:{}", pid, tid, seq, ts_ns, kind);
         EventId::from_seed(seed.as_bytes())
     }
 }
