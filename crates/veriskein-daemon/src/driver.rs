@@ -24,11 +24,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     let sink = open_sink(cli.alert_output.as_deref()).context("open alert sink")?;
     let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let config_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .context("repo root")?
-        .to_path_buf();
+    let config_root = resolve_config_root()?;
 
     let driver_cli = cli.clone();
     let driver = tokio::spawn(async move {
@@ -41,6 +37,17 @@ pub async fn run(cli: Cli) -> Result<()> {
     let _ = shutdown_tx.send(());
     driver.await.context("join daemon driver task")??;
     Ok(())
+}
+
+pub fn resolve_config_root() -> Result<std::path::PathBuf> {
+    if let Some(root) = std::env::var_os("VERISKEIN_CONFIG_ROOT") {
+        return Ok(root.into());
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .context("repo root")
+        .map(|path| path.to_path_buf())
 }
 
 pub trait EventSource {
@@ -80,6 +87,7 @@ where
     let mut graph = GraphState::new(agent_config, normalizer.workspaces().to_vec())?;
 
     info!("veriskein runtime started");
+    info!("using config root {}", config_root.display());
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
@@ -148,11 +156,7 @@ mod tests {
     }
 
     fn config_root() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("repo root")
-            .to_path_buf()
+        super::resolve_config_root().expect("repo root")
     }
 
     const TEST_ROOT_PID: u32 = 900_100;

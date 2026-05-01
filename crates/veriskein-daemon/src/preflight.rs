@@ -5,6 +5,7 @@ use caps::{CapSet, Capability};
 use veriskein_graph::AgentConfig;
 
 use crate::Cli;
+use crate::driver::resolve_config_root;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PreflightError {
@@ -12,6 +13,8 @@ pub enum PreflightError {
     KernelTooOld(String),
     #[error("missing readable BTF file at {0}")]
     MissingBtf(String),
+    #[error("tracefs is not readable at {0}; run as root or grant a DAC-bypass capability")]
+    TracefsUnreadable(String),
     #[error("failed to raise RLIMIT_MEMLOCK")]
     Memlock,
     #[error("missing required capability {0}")]
@@ -29,12 +32,10 @@ impl PreflightError {
 pub fn preflight(cli: &Cli) -> Result<(), PreflightError> {
     check_kernel_release(&read_kernel_release()?)?;
     check_btf_path(Path::new("/sys/kernel/btf/vmlinux"))?;
+    check_tracefs_path(Path::new("/sys/kernel/tracing/events/sched/sched_process_exec/id"))?;
     ensure_memlock_limit().map_err(|_| PreflightError::Memlock)?;
     ensure_capabilities()?;
-    let config_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or(PreflightError::MissingWorkspace)?;
+    let config_root = resolve_config_root().map_err(|_| PreflightError::MissingWorkspace)?;
     let default_workspace = AgentConfig::load(&config_root.join("config/agents.toml"))
         .ok()
         .map(|config| config.default_workspace)
@@ -64,6 +65,12 @@ pub fn check_btf_path(path: &Path) -> Result<(), PreflightError> {
         return Err(PreflightError::MissingBtf(path.display().to_string()));
     }
     Ok(())
+}
+
+pub fn check_tracefs_path(path: &Path) -> Result<(), PreflightError> {
+    std::fs::File::open(path)
+        .map(|_| ())
+        .map_err(|_| PreflightError::TracefsUnreadable(path.display().to_string()))
 }
 
 pub fn ensure_workspace_configured(
@@ -136,7 +143,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        PreflightError, check_btf_path, check_kernel_release, ensure_workspace_configured,
+        PreflightError, check_btf_path, check_kernel_release, check_tracefs_path,
+        ensure_workspace_configured,
     };
 
     #[test]
@@ -151,6 +159,13 @@ mod tests {
         let err = check_btf_path(&path).expect_err("missing btf must fail");
         assert!(matches!(err, PreflightError::MissingBtf(_)));
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn preflight_detects_unreadable_tracefs_target() {
+        let path = PathBuf::from("/tmp/definitely-missing-veriskein-tracefs-id");
+        let err = check_tracefs_path(&path).expect_err("missing tracefs target must fail");
+        assert!(matches!(err, PreflightError::TracefsUnreadable(_)));
     }
 
     #[test]
