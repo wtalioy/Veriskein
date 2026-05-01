@@ -184,6 +184,8 @@ impl Normalizer {
             processes: BTreeMap::new(),
             path_cache: BTreeMap::new(),
         };
+        // Bootstrapping procfs gives the daemon enough state to reason about
+        // already-running agent roots before the first live event arrives.
         normalizer.bootstrap_procfs();
         normalizer
     }
@@ -218,6 +220,8 @@ impl Normalizer {
             cached.freshness_ns = ts_ns;
             cached
         } else {
+            // Path resolution is keyed by mount namespace plus lookup basis so
+            // one process cannot poison another process's view through symlinks.
             let resolved = self.compute_resolution(&base, &lexical, ts_ns);
             self.path_cache.insert(cache_key, resolved.clone());
             resolved
@@ -245,6 +249,8 @@ impl Normalizer {
 
     fn lookup_base_path(&self, process: Option<&ProcessState>, dirfd: i32) -> PathBuf {
         if dirfd == -100 {
+            // AT_FDCWD semantics follow the process cwd snapshot we currently
+            // own, not whatever cwd the task may change to later in procfs.
             return process
                 .map(|proc| proc.cwd.clone())
                 .unwrap_or_else(|| PathBuf::from("/"));
@@ -259,6 +265,9 @@ impl Normalizer {
     }
 
     fn compute_resolution(&self, base: &Path, lexical: &Path, ts_ns: u64) -> PathResolution {
+        // Canonicalization is reserved for cases where lexical paths are not
+        // trustworthy enough for policy: sensitive paths, paths outside a
+        // workspace, or dirfds we could not reconstruct.
         let needs_canonical = self.sensitive.matching_rule(lexical).is_some()
             || self.workspace_of(lexical).is_none()
             || base == Path::new("/stale-dirfd");
@@ -314,6 +323,8 @@ impl Normalizer {
         let Ok(proc_dir) = std::fs::read_dir(proc_root) else {
             return;
         };
+        // Procfs is sampled opportunistically here; failures are expected for
+        // racing exits and should not block daemon startup.
         for entry in proc_dir.flatten() {
             let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
                 continue;

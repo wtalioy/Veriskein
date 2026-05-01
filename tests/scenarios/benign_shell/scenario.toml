@@ -1,3 +1,4 @@
+# Scenario ids are short fixture labels, not graph session ids.
 id = "H"
 timeout = "30s"
 workspace = "/tmp/ws"

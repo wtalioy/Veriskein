@@ -1,3 +1,5 @@
+# This workspace is the "allowed" side of the delete comparison in the run
+# script; the sibling scratch path is what should alert.
 id = "C"
 timeout = "30s"
 workspace = "/tmp/ws"

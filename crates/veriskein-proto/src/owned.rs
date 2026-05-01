@@ -145,6 +145,8 @@ impl OwnedEvent {
         let seq = header.seq;
         let ts_ns = header.ts_ns;
         let kind = header.kind;
+        // Event ids are deterministic from kernel header fields so the same
+        // event keeps a stable identity across parse / reserialize boundaries.
         let seed = format!("{}:{}:{}:{}:{}", pid, tid, seq, ts_ns, kind);
         EventId::from_seed(seed.as_bytes())
     }
@@ -257,6 +259,9 @@ impl<'a> EventRef<'a> {
                 expected_seq: evt.expected_seq,
                 observed_seq: evt.observed_seq,
                 missing: evt.missing,
+                // Invalid drop reasons should never happen after parse-time kind
+                // validation, but defaulting preserves observability instead of
+                // panicking inside the collection path.
                 reason: DropReason::from_raw(evt.reason).unwrap_or(DropReason::SeqGap),
             }),
         }

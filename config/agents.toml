@@ -1,5 +1,9 @@
+# Leave this empty in-repo so tests and deployments must opt into a workspace
+# explicitly unless they really want one baked into local config.
 default_workspace = ""
 
+# Basenames are matched after exec attribution, so wrappers can preserve the
+# agent identity while still delegating to a real shell binary underneath.
 binary_seeds = [
   "claude",
   "claude-code",
@@ -11,6 +15,8 @@ binary_seeds = [
 
 shell_allowlist = []
 sensitive_allowlist = []
+# Runtime scratch locations like `/dev/shm` are appended in code; this file is
+# for user-owned policy rather than hard-coded operational defaults.
 delete_allowlist = [
   "/run/**"
 ]

@@ -27,6 +27,8 @@ pub struct Cli {
 }
 
 pub fn install_tracing() {
+    // Logging is configured once from the environment so subcommands and tests
+    // can share the same knob without threading a logger handle around.
     let filter = std::env::var("VERISKEIN_LOG").unwrap_or_else(|_| "info".to_string());
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -39,6 +41,8 @@ pub async fn main_entry() -> Result<()> {
     let cli = Cli::parse();
     if let Err(err) = run(cli).await {
         if let Some(preflight) = err.downcast_ref::<PreflightError>() {
+            // Preflight failures are operational guidance, not crash reports, so
+            // they get a deterministic exit code for scenario harnesses.
             error!("{preflight}");
             std::process::exit(preflight.exit_code());
         }

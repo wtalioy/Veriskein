@@ -14,6 +14,8 @@ pub fn detect(
 ) -> Vec<Finding> {
     let binding = graph.resolve(event.process.pid);
     let mut out = Vec::new();
+    // Each detector is intentionally independent so a new rule can be added
+    // without threading side effects through a shared decision tree.
     if let Some(finding) = detect_unexpected_shell(event, graph, binding) {
         out.push(finding);
     }
@@ -194,6 +196,8 @@ fn detect_exec_observed(event: &NormalizedEvent, binding: Option<&Attribution>) 
 }
 
 fn session_binding(binding: Option<&Attribution>) -> Option<&Attribution> {
+    // Today detectors require full session attribution; keeping the helper
+    // centralized makes partial-visibility policy easier to widen later.
     binding
 }
 
@@ -244,6 +248,8 @@ fn base_finding(
 }
 
 fn preferred_path(path: &PathContext) -> String {
+    // Detector output prefers canonical paths when available so allowlists and
+    // alerts describe the same filesystem object after symlink traversal.
     path.resolution
         .canonical
         .as_ref()
@@ -253,6 +259,8 @@ fn preferred_path(path: &PathContext) -> String {
 }
 
 fn note_for_path(path: &PathContext) -> Option<String> {
+    // Expose lexical-only resolution because path confidence matters for triage
+    // even when the detector still fires.
     if path.resolution.mode == PathResolutionMode::LexicalOnly {
         Some("lexical_only".to_string())
     } else {

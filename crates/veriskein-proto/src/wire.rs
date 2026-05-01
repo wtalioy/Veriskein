@@ -6,6 +6,7 @@ use crate::defaults;
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct EventHeader {
+    // This layout is shared byte-for-byte with the BPF side.
     pub ts_ns: u64,
     pub abi_version: u32,
     pub kind: u16,
@@ -35,6 +36,8 @@ macro_rules! plain_struct {
             $(pub $field: $ty),*
         }
 
+        // `plain` is only sound here because the structs stay POD mirrors of
+        // the kernel event payloads with no Rust-managed invariants.
         unsafe impl Plain for $name {}
     };
 }

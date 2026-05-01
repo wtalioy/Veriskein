@@ -49,6 +49,8 @@ static __always_inline __u64 next_seq(void *seqs)
 {
     __u32 key = 0;
     __u64 init = 0;
+    /* One per-CPU counter is enough here because user space tracks gaps and
+     * ordering independently for each CPU stream. */
     __u64 *seq = bpf_map_lookup_elem(seqs, &key);
     if (!seq) {
         bpf_map_update_elem(seqs, &key, &init, BPF_ANY);
@@ -96,6 +98,7 @@ static __always_inline void fill_header(void *seqs, struct event_header *hdr, __
     void *task = (void *)bpf_get_current_task_btf();
 
     __builtin_memset(hdr, 0, sizeof(*hdr));
+    /* Every emitted payload shares this header contract with veriskein-proto. */
     hdr->ts_ns = bpf_ktime_get_ns();
     hdr->abi_version = EVT_ABI_VERSION;
     hdr->kind = kind;

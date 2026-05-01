@@ -66,6 +66,8 @@ impl AlertRecord {
             VisibilityState::Unavailable => "unavailable",
         };
         let alert_type = finding.finding_type.as_str().to_string();
+        // Alert ids intentionally derive from the finding shape instead of the
+        // raw event id so duplicate detector outputs can collapse downstream.
         let alert_id = veriskein_proto::EventId::from_seed(
             format!(
                 "{}:{}:{}",
@@ -123,6 +125,8 @@ impl AlertRecord {
 }
 
 fn policy_for(finding_type: FindingType) -> (&'static str, &'static str, f32) {
+    // The current detector set uses fixed policy metadata so schema consumers
+    // can rely on stable severity bands before richer scoring lands.
     match finding_type {
         FindingType::UnexpectedShell => ("high", "medium", 0.62),
         FindingType::SensitiveFileAccess => ("high", "medium", 0.68),
@@ -132,6 +136,8 @@ fn policy_for(finding_type: FindingType) -> (&'static str, &'static str, f32) {
 }
 
 pub fn emit_ndjson_line<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<()> {
+    // Flush per line so scenario assertions and streaming sinks observe alerts
+    // promptly without depending on process teardown.
     serde_json::to_writer(&mut *writer, value).context("serialize ndjson line")?;
     writer.write_all(b"\n").context("append ndjson newline")?;
     writer.flush().context("flush ndjson writer")?;

@@ -25,6 +25,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Assert { expect, actual } => {
+            // NDJSON keeps the scenario fixtures diffable and append-friendly,
+            // so the CLI reads one JSON object per non-empty line.
             let expectations: Vec<veriskein_test::Expectation> = std::fs::read_to_string(expect)?
                 .lines()
                 .filter(|line| !line.trim().is_empty())

@@ -29,6 +29,8 @@ pub fn parse(buf: &[u8]) -> Result<EventRef<'_>, ParseError> {
     }
 
     let total_len = usize::from(header.total_len);
+    // The kernel may reuse a larger scratch buffer around the event payload, so
+    // parsing clamps to the declared event length after header validation.
     if buf.len() < total_len {
         return Err(ParseError::TruncatedPayload);
     }
@@ -60,6 +62,8 @@ fn parse_as<T: plain::Plain>(buf: &[u8]) -> Result<&T, ParseError> {
 }
 
 pub fn parse_c_string(bytes: &[u8]) -> String {
+    // Kernel payloads use fixed-width inline buffers, so everything after the
+    // first NUL is capacity noise rather than data.
     let len = bytes
         .iter()
         .position(|byte| *byte == 0)
@@ -76,6 +80,8 @@ pub fn parse_arg_vector(bytes: &[u8]) -> Vec<String> {
 }
 
 pub fn parse_path_pair(bytes: &[u8]) -> (String, String) {
+    // Rename events pack both paths into one fixed buffer with an expected NUL
+    // separator, so split once and treat any tail garbage as irrelevant.
     let mut iter = bytes.splitn(3, |byte| *byte == 0);
     let left = iter.next().unwrap_or_default();
     let right = iter.next().unwrap_or_default();

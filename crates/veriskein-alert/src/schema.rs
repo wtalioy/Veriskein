@@ -9,6 +9,8 @@ const SCHEMA_SRC: &str = include_str!("../../../proto/alert.schema.json");
 
 pub fn validator() -> &'static Validator {
     VALIDATOR.get_or_init(|| {
+        // The validator is expensive enough to cache, but the schema remains
+        // compiled from the checked-in source of truth on first use.
         let schema: Value = serde_json::from_str(SCHEMA_SRC).expect("schema must parse");
         options()
             .with_draft(Draft::Draft202012)

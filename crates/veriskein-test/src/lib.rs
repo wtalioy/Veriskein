@@ -20,6 +20,8 @@ pub struct MatchSpec {
 
 pub fn assert_expectations(expectations: &[Expectation], actual: &[Value]) -> Result<()> {
     for expectation in expectations {
+        // Scenario expectations currently match only by alert type on purpose:
+        // the fixtures describe behavior, not every incidental payload field.
         let found = actual
             .iter()
             .any(|value| value["type"] == expectation.match_.alert_type);

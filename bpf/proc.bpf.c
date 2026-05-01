@@ -160,6 +160,8 @@ static __always_inline int emit_dup_event(struct sys_exit_args *ctx, __s32 fallb
     __builtin_memset(evt, 0, sizeof(*evt));
     fill_header(&seqs, &evt->header, EVT_FD_DUP, sizeof(*evt), (__s32)ctx->ret);
     evt->oldfd = args->oldfd;
+    /* dup2/dup3 choose the target fd on entry; plain dup reports it as the
+     * syscall return value, so keep whichever source is meaningful. */
     evt->newfd = fallback_newfd >= 0 ? fallback_newfd : args->newfd;
     evt->dup_ret = (__s32)ctx->ret;
     bpf_ringbuf_submit(evt, 0);
@@ -177,6 +179,8 @@ int handle_sched_process_exec(struct sched_process_exec_args *ctx)
     }
     __builtin_memset(evt, 0, sizeof(*evt));
     fill_header(&seqs, &evt->header, EVT_PROC_EXEC, sizeof(*evt), 0);
+    /* argv reconstruction is best-effort in user space; the tracepoint gives us
+     * the filename reliably without chasing user pointers here. */
     filename = (const char *)ctx + (ctx->__data_loc_filename & 0xFFFF);
     evt->filename_len = bpf_probe_read_kernel_str(&evt->filename, sizeof(evt->filename), filename);
     evt->argv_len = 0;

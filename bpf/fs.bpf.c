@@ -145,6 +145,8 @@ static __always_inline int emit_open_event(struct sys_exit_args *ctx)
     evt->ret_fd = (__s32)ctx->ret;
     evt->flags = args->flags;
     evt->mode = args->mode;
+    /* The raw syscall path is captured before any user-space canonicalization so
+     * the normalizer can decide when lexical vs canonical resolution matters. */
     evt->path_len = bpf_probe_read_user_str(&evt->path, sizeof(evt->path), args->path);
     bpf_ringbuf_submit(evt, 0);
     bpf_map_delete_elem(&open_args, &tid);
@@ -254,6 +256,8 @@ int handle_exit_renameat2(struct sys_exit_args *ctx)
         old_len = 0;
     }
     evt->oldpath_len = old_len;
+    /* Old and new paths live in one inline buffer to keep the wire format fixed
+     * width for ring buffer emission and plain parsing. */
     evt->newpath_len = bpf_probe_read_user_str(&evt->paths[PATH_INLINE_MAX], PATH_INLINE_MAX, args->newpath);
     bpf_ringbuf_submit(evt, 0);
     bpf_map_delete_elem(&rename_args, &tid);

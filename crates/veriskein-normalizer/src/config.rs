@@ -105,6 +105,8 @@ pub fn load_workspaces(workspaces: &[PathBuf]) -> Result<Vec<WorkspaceRef>> {
         .iter()
         .enumerate()
         .map(|(idx, root)| {
+            // Tests often create the workspace path after config load, so a
+            // missing directory still gets a stable lexical identity.
             let canonical = if root.exists() {
                 std::fs::canonicalize(root)
                     .with_context(|| format!("canonicalize workspace {}", root.display()))?
@@ -120,6 +122,8 @@ pub fn load_workspaces(workspaces: &[PathBuf]) -> Result<Vec<WorkspaceRef>> {
 }
 
 pub fn lexical_clean(path: &Path) -> PathBuf {
+    // This stays purely lexical so callers can normalize paths that do not yet
+    // exist or that would resolve differently across mount namespaces.
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

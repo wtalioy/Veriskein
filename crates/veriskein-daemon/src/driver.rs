@@ -43,6 +43,8 @@ pub fn resolve_config_root() -> Result<std::path::PathBuf> {
     if let Some(root) = std::env::var_os("VERISKEIN_CONFIG_ROOT") {
         return Ok(root.into());
     }
+    // Tests and scenario harnesses override the config root so the daemon can
+    // run against per-run config snapshots instead of mutating the repo copy.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())
@@ -79,6 +81,8 @@ where
     let sensitive = SensitiveConfig::load(&config_root.join("config/sensitive.toml"))?;
     let agent_config = AgentConfig::load(&config_root.join("config/agents.toml"))?;
     let mut workspace_inputs = cli.workspaces.clone();
+    // The CLI wins when it is explicit, but unattended runs still need a
+    // stable default workspace from config so preflight and runtime agree.
     if workspace_inputs.is_empty() && !agent_config.default_workspace.is_empty() {
         workspace_inputs.push(agent_config.default_workspace.clone().into());
     }
@@ -92,6 +96,9 @@ where
         tokio::select! {
             _ = &mut shutdown_rx => break,
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                // RuntimeEventSource is a non-blocking poll surface. Drain
+                // everything currently buffered before sleeping again so graph
+                // state and detector ordering stay aligned with ingest order.
                 while let Some(raw) = source.try_recv()? {
                     let events = collector.process_bytes(&raw).context("process raw BPF event")?;
                     for mut collected in events {
@@ -183,6 +190,8 @@ mod tests {
         let sink = open_sink(Some(&path)).expect("open sink");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
+        // The driver loop owns its own pacing, so tests let it run briefly and
+        // then trigger shutdown rather than trying to synchronize each poll.
         let handle = tokio::spawn(async move {
             run_with_source_and_sink(
                 source,

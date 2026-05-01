@@ -1,1 +1,3 @@
 # Optional runtime overrides land here in later phases.
+# Keeping the file checked in now gives operators a stable place for future
+# per-host tuning without changing the daemon's default search paths.

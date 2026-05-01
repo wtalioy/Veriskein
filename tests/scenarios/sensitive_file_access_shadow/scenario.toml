@@ -1,3 +1,5 @@
+# The workspace path is not the sensitive target here; it only anchors session
+# attribution while `.zshrc` reaches into the synthetic shadow path.
 id = "B"
 timeout = "30s"
 workspace = "/tmp/ws"

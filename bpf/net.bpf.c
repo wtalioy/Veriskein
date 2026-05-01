@@ -111,6 +111,8 @@ int handle_exit_connect(struct sys_exit_args *ctx)
     evt->connect_ret = (__s32)ctx->ret;
     bpf_probe_read_user(&family, sizeof(family), args->addr);
     evt->family = family;
+    /* Only enough address data for coarse classification is copied here; richer
+     * connection state belongs in later user-space correlation layers. */
     if (family == 2) {
         struct sockaddr_in_raw sin = {};
         bpf_probe_read_user(&sin, sizeof(sin), args->addr);
@@ -122,6 +124,7 @@ int handle_exit_connect(struct sys_exit_args *ctx)
         evt->dport_be = sin6.port_be;
         __builtin_memcpy(&evt->addr_dst, &sin6.addr, sizeof(sin6.addr));
     }
+    /* Port 443 is only a cheap seed for later TLS-aware logic, not proof. */
     evt->tls_candidate = evt->dport_be == __builtin_bswap16(443);
     bpf_ringbuf_submit(evt, 0);
     bpf_map_delete_elem(&connect_args, &tid);

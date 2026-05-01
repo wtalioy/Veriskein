@@ -36,6 +36,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -e "${ARTIFACT_DIR}" && ! -w "${ARTIFACT_DIR}" ]]; then
+  # Sudo-driven test runs often leave repo-local artifacts unwritable for the
+  # current user, so fall back to a target-owned location instead of failing.
   ARTIFACT_DIR="${ROOT_DIR}/target/veriskein-artifacts"
 fi
 mkdir -p "${ARTIFACT_DIR}"
@@ -60,6 +62,8 @@ run_scenario() {
   echo "RUN ${slug}"
 
   mkdir -p "${workspace}" "${scratch}" "${config_root}/config"
+  # Each scenario runs against an isolated config copy so setup scripts can
+  # patch rules without leaking state into later scenarios.
   cp "${ROOT_DIR}/config/"*.toml "${config_root}/config/"
 
   export VERISKEIN_ROOT="${ROOT_DIR}"
@@ -92,6 +96,8 @@ run_scenario() {
   timeout "${SCENARIO_TIMEOUT_SECS}s" "${scenario_dir}/run.sh" </dev/null
   sleep 1
 
+  # Ask the daemon to flush and stop cleanly so alert assertions see the final
+  # NDJSON output instead of racing a forced exit.
   kill -TERM "${daemon_pid}"
   wait "${daemon_pid}"
 

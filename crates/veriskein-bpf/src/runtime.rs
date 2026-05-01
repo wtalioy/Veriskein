@@ -29,6 +29,8 @@ impl RuntimeEventSource {
                 let mut objects = load_objects()?;
                 let mut links = Vec::<Link>::new();
 
+                // Attach every program before building the ring buffer so probe
+                // activation is all-or-nothing from the daemon's perspective.
                 for object in &mut objects {
                     for program in object.progs_mut() {
                         links.push(program.attach().context("attach BPF program")?);
@@ -49,6 +51,8 @@ impl RuntimeEventSource {
                 for events_map in &event_maps {
                     let sender = tx.clone();
                     builder
+                        // Copy into owned bytes immediately because libbpf only
+                        // lends ring buffer memory for the callback duration.
                         .add(&*events_map, move |data| match sender.send(data.to_vec()) {
                             Ok(()) => 0,
                             Err(_) => -libc::ECANCELED,
@@ -110,6 +114,8 @@ impl Drop for RuntimeEventSource {
 }
 
 fn load_objects() -> Result<Vec<Object>> {
+    // Runtime loading order matches the logical ownership split in `bpf/` and
+    // keeps object-specific errors easy to attribute.
     [
         ("proc", PROC_BPF_OBJECT),
         ("fs", FS_BPF_OBJECT),

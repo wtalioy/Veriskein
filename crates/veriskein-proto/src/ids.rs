@@ -22,6 +22,8 @@ macro_rules! impl_id {
     ($name:ident) => {
         impl $name {
             pub fn from_seed(seed: &[u8]) -> Self {
+                // Truncating blake3 keeps ids compact for schemas and logs while
+                // still being deterministic across components.
                 let digest = blake3::hash(seed);
                 let mut bytes = [0_u8; 16];
                 bytes.copy_from_slice(&digest.as_bytes()[..16]);

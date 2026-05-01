@@ -1,3 +1,5 @@
+# This list stays intentionally small and high-signal for Phase 1 so detector
+# behavior remains explainable in tests and local demos.
 [[rule]]
 glob = "/etc/shadow"
 severity = "high"
@@ -38,6 +40,8 @@ severity = "medium"
 glob = "/home/*/.zsh_history"
 severity = "medium"
 
+# `/etc/passwd` is low severity because reads are common, but it still helps
+# exercise the full sensitive-path pipeline end to end.
 [[rule]]
 glob = "/etc/passwd"
 severity = "low"

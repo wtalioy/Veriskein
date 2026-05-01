@@ -42,6 +42,8 @@ pub struct GraphState {
 impl GraphState {
     pub fn new(config: AgentConfig, workspaces: Vec<WorkspaceRef>) -> Result<Self> {
         let mut delete_patterns = config.delete_allowlist.clone();
+        // These runtime-owned scratch locations are noisy enough that the graph
+        // bakes them in even when the user config omits them.
         for pattern in ["/var/tmp/**", "/run/**", "/dev/shm/**"] {
             if !delete_patterns.iter().any(|existing| existing == pattern) {
                 delete_patterns.push(pattern.to_string());
@@ -62,6 +64,8 @@ impl GraphState {
         self.collect_garbage(event.ts_ns);
         match &event.data {
             NormalizedData::ProcFork { child_pid, .. } => {
+                // Child processes inherit the active session immediately so the
+                // next syscall after fork is still attributable.
                 let parent = self.resolve(event.process.pid)?.clone();
                 self.bindings.insert(*child_pid, parent.clone());
                 Some(parent)
@@ -125,6 +129,9 @@ impl GraphState {
             root_pid: event.process.pid,
             state: SessionState::RootCandidate,
         };
+        // The state machine keeps the explicit candidate step even though Phase
+        // 1 confirms immediately, because later heuristics may require delayed
+        // promotion without changing the external graph contract.
         self.bindings.insert(event.process.pid, attribution.clone());
         attribution.state = SessionState::ConfirmedRoot;
         self.bindings.insert(event.process.pid, attribution.clone());
@@ -142,6 +149,8 @@ impl GraphState {
             pid,
             DrainingBinding {
                 attribution: attribution.clone(),
+                // Draining keeps late file/network events attributable after a
+                // root process exits but children or delayed cleanup linger.
                 expires_at_ns: event.ts_ns + defaults::SESSION_DRAIN_SECS * 1_000_000_000,
             },
         );
@@ -161,6 +170,8 @@ impl GraphState {
     }
 
     fn workspace_for_event(&self, event: &NormalizedEvent) -> Option<WorkspaceRef> {
+        // CWD is the primary workspace signal in Phase 1; a configured default
+        // only fills the gap when the process has not entered a workspace yet.
         if let Some(workspace) = self
             .workspaces
             .iter()

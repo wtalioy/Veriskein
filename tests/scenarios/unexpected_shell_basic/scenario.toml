@@ -1,3 +1,5 @@
+# Each scenario uses the same synthetic workspace root; isolation comes from the
+# per-run artifact directory the harness creates around it.
 id = "A"
 timeout = "30s"
 workspace = "/tmp/ws"
