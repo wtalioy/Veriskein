@@ -155,13 +155,16 @@ mod tests {
             .to_path_buf()
     }
 
+    const TEST_ROOT_PID: u32 = 900_100;
+    const TEST_CHILD_PID: u32 = 900_101;
+
     #[tokio::test]
     async fn driver_emits_schema_valid_exec_observed_alert() {
         let source = FakeSource::new(vec![build_exec_event_bytes(
             0,
             1,
-            4242,
-            4242,
+            TEST_ROOT_PID,
+            TEST_ROOT_PID,
             1,
             "claude",
             "/usr/bin/claude",
@@ -201,9 +204,36 @@ mod tests {
     #[tokio::test]
     async fn driver_emits_unexpected_shell_alert() {
         let source = FakeSource::new(vec![
-            build_exec_event_bytes(0, 1, 100, 100, 1, "claude", "/usr/bin/claude", &["claude"]),
-            build_proc_fork_event_bytes(0, 2, 100, 100, 1, "claude", 101, 101),
-            build_exec_event_bytes(0, 3, 101, 101, 100, "sh", "/bin/sh", &["sh", "-lc", "echo"]),
+            build_exec_event_bytes(
+                0,
+                1,
+                TEST_ROOT_PID,
+                TEST_ROOT_PID,
+                1,
+                "claude",
+                "/usr/bin/claude",
+                &["claude"],
+            ),
+            build_proc_fork_event_bytes(
+                0,
+                2,
+                TEST_ROOT_PID,
+                TEST_ROOT_PID,
+                1,
+                "claude",
+                TEST_CHILD_PID,
+                TEST_CHILD_PID,
+            ),
+            build_exec_event_bytes(
+                0,
+                3,
+                TEST_CHILD_PID,
+                TEST_CHILD_PID,
+                TEST_ROOT_PID,
+                "sh",
+                "/bin/sh",
+                &["sh", "-lc", "echo"],
+            ),
         ]);
         let file = NamedTempFile::new().expect("temp file");
         let path = file.path().to_path_buf();
@@ -239,9 +269,38 @@ mod tests {
     #[tokio::test]
     async fn driver_emits_sensitive_and_outside_workspace_alerts() {
         let source = FakeSource::new(vec![
-            build_exec_event_bytes(0, 1, 100, 100, 1, "claude", "/usr/bin/claude", &["claude"]),
-            build_file_open_event_bytes(0, 2, 100, 100, 1, "claude", -100, 3, "/etc/shadow"),
-            build_file_unlink_event_bytes(0, 3, 100, 100, 1, "claude", -100, 0, "/tmp/outside.txt"),
+            build_exec_event_bytes(
+                0,
+                1,
+                TEST_ROOT_PID,
+                TEST_ROOT_PID,
+                1,
+                "claude",
+                "/usr/bin/claude",
+                &["claude"],
+            ),
+            build_file_open_event_bytes(
+                0,
+                2,
+                TEST_ROOT_PID,
+                TEST_ROOT_PID,
+                1,
+                "claude",
+                -100,
+                3,
+                "/etc/shadow",
+            ),
+            build_file_unlink_event_bytes(
+                0,
+                3,
+                TEST_ROOT_PID,
+                TEST_ROOT_PID,
+                1,
+                "claude",
+                -100,
+                0,
+                "/tmp/outside.txt",
+            ),
         ]);
         let file = NamedTempFile::new().expect("temp file");
         let path = file.path().to_path_buf();

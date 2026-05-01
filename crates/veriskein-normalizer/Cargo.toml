@@ -17,5 +17,8 @@ thiserror.workspace = true
 toml.workspace = true
 veriskein-proto = { path = "../veriskein-proto" }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

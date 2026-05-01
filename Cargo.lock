@@ -1940,6 +1940,7 @@ dependencies = [
  "anyhow",
  "globset",
  "serde",
+ "tempfile",
  "thiserror",
  "toml",
  "veriskein-proto",

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use veriskein_proto::{OwnedEvent, OwnedProcExecEvent};
+use veriskein_proto::{OwnedEvent, OwnedProcExecEvent, parse_arg_vector};
 
 pub fn enrich_event_from_procfs(event: &mut OwnedEvent) {
     if let OwnedEvent::ProcExec(exec) = event {
@@ -26,7 +26,7 @@ impl ProcfsExecSnapshot {
             .ok()
             .map(|path| path.display().to_string())?;
         let argv_bytes = std::fs::read(proc_root.join("cmdline")).ok()?;
-        let argv = parse_proc_cmdline(&argv_bytes);
+        let argv = parse_arg_vector(&argv_bytes);
         Some(Self { exe_path, argv })
     }
 }
@@ -40,25 +40,17 @@ fn apply_procfs_snapshot(exec: &mut OwnedProcExecEvent, snapshot: ProcfsExecSnap
     }
 }
 
-fn parse_proc_cmdline(bytes: &[u8]) -> Vec<String> {
-    bytes
-        .split(|byte| *byte == 0)
-        .filter(|chunk| !chunk.is_empty())
-        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::env;
 
-    use veriskein_proto::EventHeader;
+    use veriskein_proto::{EventHeader, parse_arg_vector};
 
-    use super::{ProcfsExecSnapshot, apply_procfs_snapshot, parse_proc_cmdline};
+    use super::{ProcfsExecSnapshot, apply_procfs_snapshot};
 
     #[test]
     fn proc_cmdline_parser_splits_nul_bytes() {
-        let argv = parse_proc_cmdline(b"bash\0-lc\0true\0");
+        let argv = parse_arg_vector(b"bash\0-lc\0true\0");
         assert_eq!(argv, vec!["bash", "-lc", "true"]);
     }
 

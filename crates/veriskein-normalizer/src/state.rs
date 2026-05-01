@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use veriskein_proto::{
-    EventKind, OwnedEvent, OwnedFdDupEvent, OwnedFileOpenEvent, OwnedFileRenameEvent,
+    EventHeader, EventKind, OwnedEvent, OwnedFdDupEvent, OwnedFileOpenEvent, OwnedFileRenameEvent,
     OwnedFileUnlinkEvent, OwnedNetConnectEvent, OwnedProcChdirEvent, OwnedProcExecEvent,
-    OwnedProcExitEvent, OwnedProcForkEvent,
+    OwnedProcExitEvent, OwnedProcForkEvent, parse_arg_vector, parse_c_string,
 };
 
 use crate::config::{SensitiveConfig, WorkspaceRef, lexical_clean};
@@ -55,15 +55,43 @@ pub struct ProcessSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum NormalizedData {
-    ProcFork { child_pid: u32, child_tid: u32 },
-    ProcExec { filename: String, argv: Vec<String> },
-    ProcExit { exit_code: i32 },
-    ProcChdir { path: PathContext },
-    FdDup { oldfd: i32, newfd: i32, dup_ret: i32 },
-    FileOpen { ret_fd: i32, path: PathContext },
-    FileUnlink { path: PathContext },
-    FileRename { old_path: PathContext, new_path: PathContext },
-    NetConnect { sockfd: i32, dport_be: u16, tls_candidate: bool },
+    ProcFork {
+        child_pid: u32,
+        child_tid: u32,
+    },
+    ProcExec {
+        filename: String,
+        argv: Vec<String>,
+    },
+    ProcExit {
+        exit_code: i32,
+    },
+    ProcChdir {
+        path: PathContext,
+    },
+    FdDup {
+        oldfd: i32,
+        newfd: i32,
+        dup_ret: i32,
+    },
+    FileOpen {
+        ret_fd: i32,
+        path: PathContext,
+    },
+    FileUnlink {
+        unlink_ret: i32,
+        path: PathContext,
+    },
+    FileRename {
+        rename_ret: i32,
+        old_path: PathContext,
+        new_path: PathContext,
+    },
+    NetConnect {
+        sockfd: i32,
+        dport_be: u16,
+        tls_candidate: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,28 +122,22 @@ struct ProcessState {
 }
 
 impl ProcessState {
-    fn from_procfs(pid: u32) -> Option<Self> {
-        let proc_root = PathBuf::from("/proc").join(pid.to_string());
-        let cwd = std::fs::read_link(proc_root.join("cwd")).ok()?;
-        let exe = std::fs::read_link(proc_root.join("exe"))
+    fn from_proc_root(proc_root: &Path, pid: u32) -> Option<Self> {
+        let proc_dir = proc_root.join(pid.to_string());
+        let cwd = std::fs::read_link(proc_dir.join("cwd")).ok()?;
+        let exe = std::fs::read_link(proc_dir.join("exe"))
             .ok()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        let comm = std::fs::read_to_string(proc_root.join("comm"))
+        let comm = std::fs::read(proc_dir.join("comm"))
             .ok()
-            .map(|text| text.trim().to_string())
+            .map(|bytes| parse_c_string(&bytes).trim_end().to_string())
             .unwrap_or_default();
-        let argv = std::fs::read(proc_root.join("cmdline"))
+        let argv = std::fs::read(proc_dir.join("cmdline"))
             .ok()
-            .map(|bytes| {
-                bytes
-                    .split(|byte| *byte == 0)
-                    .filter(|chunk| !chunk.is_empty())
-                    .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-                    .collect::<Vec<_>>()
-            })
+            .map(|bytes| parse_arg_vector(&bytes))
             .unwrap_or_default();
-        let ppid = std::fs::read_to_string(proc_root.join("status"))
+        let ppid = std::fs::read_to_string(proc_dir.join("status"))
             .ok()
             .and_then(|status| {
                 status.lines().find_map(|line| {
@@ -124,6 +146,7 @@ impl ProcessState {
                 })
             })
             .unwrap_or(0);
+        let fds = read_fd_entries(&proc_dir);
 
         Some(Self {
             pid,
@@ -133,7 +156,7 @@ impl ProcessState {
             comm,
             argv,
             cwd,
-            fds: BTreeMap::new(),
+            fds,
         })
     }
 }
@@ -206,7 +229,11 @@ impl Normalizer {
                 ),
             }
         } else {
-            (None, PathResolutionMode::LexicalOnly, PathVerdict::LexicalTrusted)
+            (
+                None,
+                PathResolutionMode::LexicalOnly,
+                PathVerdict::LexicalTrusted,
+            )
         };
         let preferred = canonical.as_ref().unwrap_or(&lexical);
         let sensitive = self.sensitive.matching_rule(preferred);
@@ -233,7 +260,11 @@ impl Normalizer {
     }
 
     fn bootstrap_procfs(&mut self) {
-        let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        self.bootstrap_procfs_from(Path::new("/proc"));
+    }
+
+    fn bootstrap_procfs_from(&mut self, proc_root: &Path) {
+        let Ok(proc_dir) = std::fs::read_dir(proc_root) else {
             return;
         };
         for entry in proc_dir.flatten() {
@@ -241,13 +272,13 @@ impl Normalizer {
             let Some(pid) = name.to_string_lossy().parse::<u32>().ok() else {
                 continue;
             };
-            if let Some(state) = ProcessState::from_procfs(pid) {
+            if let Some(state) = ProcessState::from_proc_root(proc_root, pid) {
                 self.processes.insert(pid, state);
             }
         }
     }
 
-    fn snapshot_for(&self, pid: u32, fallback_header: &veriskein_proto::EventHeader) -> ProcessSnapshot {
+    fn snapshot_for(&self, pid: u32, fallback_header: &EventHeader) -> ProcessSnapshot {
         if let Some(proc) = self.processes.get(&pid) {
             ProcessSnapshot {
                 pid: proc.pid,
@@ -267,9 +298,7 @@ impl Normalizer {
                 tid,
                 ppid,
                 exe: String::new(),
-                comm: String::from_utf8_lossy(&fallback_header.comm)
-                    .trim_matches(char::from(0))
-                    .to_string(),
+                comm: parse_c_string(&fallback_header.comm),
                 argv: Vec::new(),
                 cwd: self
                     .workspaces
@@ -302,17 +331,21 @@ impl Normalizer {
                 ..child
             },
         );
-        vec![NormalizedEvent {
-            ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::ProcFork(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::ProcFork,
-            process: self.snapshot_for(parent_pid, &evt.header),
-            data: NormalizedData::ProcFork {
-                child_pid: evt.child_pid,
-                child_tid: evt.child_tid,
-            },
-        }]
+        vec![
+            self.normalized_event(
+                ingest_seq,
+                EventKind::ProcFork,
+                self.snapshot_for(parent_pid, &evt.header),
+                veriskein_proto::OwnedEvent::ProcFork(evt.clone())
+                    .event_id()
+                    .hex(),
+                evt.header.ts_ns,
+                NormalizedData::ProcFork {
+                    child_pid: evt.child_pid,
+                    child_tid: evt.child_tid,
+                },
+            ),
+        ]
     }
 
     fn on_proc_exec(&mut self, ingest_seq: u64, evt: &OwnedProcExecEvent) -> NormalizedEvent {
@@ -323,7 +356,11 @@ impl Normalizer {
             .processes
             .get(&pid)
             .map(|proc| proc.cwd.clone())
-            .or_else(|| self.workspaces.first().map(|workspace| workspace.root.clone()))
+            .or_else(|| {
+                self.workspaces
+                    .first()
+                    .map(|workspace| workspace.root.clone())
+            })
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
         self.processes.insert(
             pid,
@@ -332,7 +369,7 @@ impl Normalizer {
                 tid,
                 ppid,
                 exe: evt.filename.clone(),
-                comm: parse_comm(&evt.header.comm),
+                comm: parse_c_string(&evt.header.comm),
                 argv: evt.argv.clone(),
                 cwd,
                 fds: self
@@ -342,36 +379,46 @@ impl Normalizer {
                     .unwrap_or_default(),
             },
         );
-        NormalizedEvent {
+        self.normalized_event(
             ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::ProcExec(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::ProcExec,
-            process: self.snapshot_for(pid, &evt.header),
-            data: NormalizedData::ProcExec {
+            EventKind::ProcExec,
+            self.snapshot_for(pid, &evt.header),
+            veriskein_proto::OwnedEvent::ProcExec(evt.clone())
+                .event_id()
+                .hex(),
+            evt.header.ts_ns,
+            NormalizedData::ProcExec {
                 filename: evt.filename.clone(),
                 argv: evt.argv.clone(),
             },
-        }
+        )
     }
 
     fn on_proc_exit(&mut self, ingest_seq: u64, evt: &OwnedProcExitEvent) -> Vec<NormalizedEvent> {
         let pid = evt.header.pid;
         let snapshot = self.snapshot_for(pid, &evt.header);
         self.processes.remove(&pid);
-        vec![NormalizedEvent {
-            ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::ProcExit(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::ProcExit,
-            process: snapshot,
-            data: NormalizedData::ProcExit {
-                exit_code: evt.exit_code,
-            },
-        }]
+        vec![
+            self.normalized_event(
+                ingest_seq,
+                EventKind::ProcExit,
+                snapshot,
+                veriskein_proto::OwnedEvent::ProcExit(evt.clone())
+                    .event_id()
+                    .hex(),
+                evt.header.ts_ns,
+                NormalizedData::ProcExit {
+                    exit_code: evt.exit_code,
+                },
+            ),
+        ]
     }
 
-    fn on_proc_chdir(&mut self, ingest_seq: u64, evt: &OwnedProcChdirEvent) -> Vec<NormalizedEvent> {
+    fn on_proc_chdir(
+        &mut self,
+        ingest_seq: u64,
+        evt: &OwnedProcChdirEvent,
+    ) -> Vec<NormalizedEvent> {
         let pid = evt.header.pid;
         let resolved = self.resolve_path(pid, -100, &evt.path, evt.header.ts_ns);
         if let Some(proc) = self.processes.get_mut(&pid) {
@@ -381,14 +428,18 @@ impl Normalizer {
                 .clone()
                 .unwrap_or_else(|| resolved.resolution.lexical.clone());
         }
-        vec![NormalizedEvent {
-            ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::ProcChdir(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::ProcChdir,
-            process: self.snapshot_for(pid, &evt.header),
-            data: NormalizedData::ProcChdir { path: resolved },
-        }]
+        vec![
+            self.normalized_event(
+                ingest_seq,
+                EventKind::ProcChdir,
+                self.snapshot_for(pid, &evt.header),
+                veriskein_proto::OwnedEvent::ProcChdir(evt.clone())
+                    .event_id()
+                    .hex(),
+                evt.header.ts_ns,
+                NormalizedData::ProcChdir { path: resolved },
+            ),
+        ]
     }
 
     fn on_fd_dup(&mut self, ingest_seq: u64, evt: &OwnedFdDupEvent) -> Vec<NormalizedEvent> {
@@ -402,18 +453,22 @@ impl Normalizer {
                 proc.fds.remove(&evt.newfd);
             }
         }
-        vec![NormalizedEvent {
-            ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::FdDup(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::FdDup,
-            process: self.snapshot_for(pid, &evt.header),
-            data: NormalizedData::FdDup {
-                oldfd: evt.oldfd,
-                newfd: evt.newfd,
-                dup_ret: evt.dup_ret,
-            },
-        }]
+        vec![
+            self.normalized_event(
+                ingest_seq,
+                EventKind::FdDup,
+                self.snapshot_for(pid, &evt.header),
+                veriskein_proto::OwnedEvent::FdDup(evt.clone())
+                    .event_id()
+                    .hex(),
+                evt.header.ts_ns,
+                NormalizedData::FdDup {
+                    oldfd: evt.oldfd,
+                    newfd: evt.newfd,
+                    dup_ret: evt.dup_ret,
+                },
+            ),
+        ]
     }
 
     fn on_file_open(&mut self, ingest_seq: u64, evt: &OwnedFileOpenEvent) -> Vec<NormalizedEvent> {
@@ -429,17 +484,21 @@ impl Normalizer {
                 proc.fds.insert(evt.ret_fd, FdEntry::File(stored));
             }
         }
-        vec![NormalizedEvent {
-            ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::FileOpen(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::FileOpen,
-            process: self.snapshot_for(pid, &evt.header),
-            data: NormalizedData::FileOpen {
-                ret_fd: evt.ret_fd,
-                path: resolved,
-            },
-        }]
+        vec![
+            self.normalized_event(
+                ingest_seq,
+                EventKind::FileOpen,
+                self.snapshot_for(pid, &evt.header),
+                veriskein_proto::OwnedEvent::FileOpen(evt.clone())
+                    .event_id()
+                    .hex(),
+                evt.header.ts_ns,
+                NormalizedData::FileOpen {
+                    ret_fd: evt.ret_fd,
+                    path: resolved,
+                },
+            ),
+        ]
     }
 
     fn on_file_unlink(
@@ -449,14 +508,21 @@ impl Normalizer {
     ) -> Vec<NormalizedEvent> {
         let pid = evt.header.pid;
         let resolved = self.resolve_path(pid, evt.dirfd, &evt.path, evt.header.ts_ns);
-        vec![NormalizedEvent {
-            ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::FileUnlink(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::FileUnlink,
-            process: self.snapshot_for(pid, &evt.header),
-            data: NormalizedData::FileUnlink { path: resolved },
-        }]
+        vec![
+            self.normalized_event(
+                ingest_seq,
+                EventKind::FileUnlink,
+                self.snapshot_for(pid, &evt.header),
+                veriskein_proto::OwnedEvent::FileUnlink(evt.clone())
+                    .event_id()
+                    .hex(),
+                evt.header.ts_ns,
+                NormalizedData::FileUnlink {
+                    unlink_ret: evt.unlink_ret,
+                    path: resolved,
+                },
+            ),
+        ]
     }
 
     fn on_file_rename(
@@ -467,54 +533,97 @@ impl Normalizer {
         let pid = evt.header.pid;
         let old_path = self.resolve_path(pid, evt.olddirfd, &evt.old_path, evt.header.ts_ns);
         let new_path = self.resolve_path(pid, evt.newdirfd, &evt.new_path, evt.header.ts_ns);
-        vec![NormalizedEvent {
-            ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::FileRename(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::FileRename,
-            process: self.snapshot_for(pid, &evt.header),
-            data: NormalizedData::FileRename { old_path, new_path },
-        }]
+        vec![
+            self.normalized_event(
+                ingest_seq,
+                EventKind::FileRename,
+                self.snapshot_for(pid, &evt.header),
+                veriskein_proto::OwnedEvent::FileRename(evt.clone())
+                    .event_id()
+                    .hex(),
+                evt.header.ts_ns,
+                NormalizedData::FileRename {
+                    rename_ret: evt.rename_ret,
+                    old_path,
+                    new_path,
+                },
+            ),
+        ]
     }
 
-    fn on_net_connect(
-        &mut self,
-        ingest_seq: u64,
-        evt: &OwnedNetConnectEvent,
-    ) -> NormalizedEvent {
+    fn on_net_connect(&mut self, ingest_seq: u64, evt: &OwnedNetConnectEvent) -> NormalizedEvent {
         let pid = evt.header.pid;
-        NormalizedEvent {
+        self.normalized_event(
             ingest_seq,
-            event_id: veriskein_proto::OwnedEvent::NetConnect(evt.clone()).event_id().hex(),
-            ts_ns: evt.header.ts_ns,
-            kind: EventKind::NetConnect,
-            process: self.snapshot_for(pid, &evt.header),
-            data: NormalizedData::NetConnect {
+            EventKind::NetConnect,
+            self.snapshot_for(pid, &evt.header),
+            veriskein_proto::OwnedEvent::NetConnect(evt.clone())
+                .event_id()
+                .hex(),
+            evt.header.ts_ns,
+            NormalizedData::NetConnect {
                 sockfd: evt.sockfd,
                 dport_be: evt.dport_be,
                 tls_candidate: evt.tls_candidate,
             },
+        )
+    }
+
+    fn normalized_event(
+        &self,
+        ingest_seq: u64,
+        kind: EventKind,
+        process: ProcessSnapshot,
+        event_id: String,
+        ts_ns: u64,
+        data: NormalizedData,
+    ) -> NormalizedEvent {
+        NormalizedEvent {
+            ingest_seq,
+            event_id,
+            ts_ns,
+            kind,
+            process,
+            data,
         }
     }
 }
 
-fn parse_comm(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+fn read_fd_entries(proc_dir: &Path) -> BTreeMap<i32, FdEntry> {
+    let mut fds = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(proc_dir.join("fd")) else {
+        return fds;
+    };
+
+    for entry in entries.flatten() {
+        let Some(fd) = entry.file_name().to_string_lossy().parse::<i32>().ok() else {
+            continue;
+        };
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        fds.insert(fd, FdEntry::File(target));
+    }
+
+    fds
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
+    use tempfile::TempDir;
     use veriskein_proto::{
-        build_exec_event_bytes, build_file_open_event_bytes, build_file_unlink_event_bytes,
-        build_proc_chdir_event_bytes,
+        build_exec_event_bytes, build_file_open_event_bytes, build_file_rename_event_bytes,
+        build_file_unlink_event_bytes, build_proc_chdir_event_bytes,
     };
 
     use crate::config::{SensitiveConfig, load_workspaces};
 
-    use super::{Normalizer, NormalizedData, PathResolutionMode, PathVerdict};
+    use super::{NormalizedData, Normalizer, PathResolutionMode, PathVerdict};
 
     fn normalizer() -> Normalizer {
         let sensitive = SensitiveConfig::from_toml_str(
@@ -533,13 +642,26 @@ severity = "high"
     fn resolves_at_fdcwd_path() {
         let mut norm = normalizer();
         let exec = veriskein_proto::parse(&build_exec_event_bytes(
-            0, 1, 100, 100, 1, "claude", "/usr/bin/claude", &["claude"],
+            0,
+            1,
+            100,
+            100,
+            1,
+            "claude",
+            "/usr/bin/claude",
+            &["claude"],
         ))
         .expect("parse")
         .to_owned();
         norm.apply(1, &exec);
         let chdir = veriskein_proto::parse(&build_proc_chdir_event_bytes(
-            0, 2, 100, 100, 1, "claude", "/tmp/veriskein-ws/subdir",
+            0,
+            2,
+            100,
+            100,
+            1,
+            "claude",
+            "/tmp/veriskein-ws/subdir",
         ))
         .expect("parse")
         .to_owned();
@@ -554,7 +676,9 @@ severity = "high"
             NormalizedData::FileOpen { path, .. } => {
                 assert_eq!(path.resolution.mode, PathResolutionMode::LexicalOnly);
                 assert!(
-                    path.resolution.lexical.ends_with(Path::new("/tmp/veriskein-ws/subdir/file.txt"))
+                    path.resolution
+                        .lexical
+                        .ends_with(Path::new("/tmp/veriskein-ws/subdir/file.txt"))
                 );
             }
             _ => panic!("expected file open"),
@@ -565,13 +689,28 @@ severity = "high"
     fn sensitive_match_sets_context() {
         let mut norm = normalizer();
         let exec = veriskein_proto::parse(&build_exec_event_bytes(
-            0, 1, 101, 101, 1, "claude", "/usr/bin/claude", &["claude"],
+            0,
+            1,
+            101,
+            101,
+            1,
+            "claude",
+            "/usr/bin/claude",
+            &["claude"],
         ))
         .expect("parse")
         .to_owned();
         norm.apply(1, &exec);
         let open = veriskein_proto::parse(&build_file_open_event_bytes(
-            0, 2, 101, 101, 1, "claude", -100, 3, "/etc/shadow",
+            0,
+            2,
+            101,
+            101,
+            1,
+            "claude",
+            -100,
+            3,
+            "/etc/shadow",
         ))
         .expect("parse")
         .to_owned();
@@ -592,7 +731,14 @@ severity = "high"
     fn stale_dirfd_falls_back_to_unresolved_path() {
         let mut norm = normalizer();
         let exec = veriskein_proto::parse(&build_exec_event_bytes(
-            0, 1, 102, 102, 1, "claude", "/usr/bin/claude", &["claude"],
+            0,
+            1,
+            102,
+            102,
+            1,
+            "claude",
+            "/usr/bin/claude",
+            &["claude"],
         ))
         .expect("parse")
         .to_owned();
@@ -615,20 +761,189 @@ severity = "high"
     fn workspace_of_distinguishes_inside_and_outside() {
         let mut norm = normalizer();
         let exec = veriskein_proto::parse(&build_exec_event_bytes(
-            0, 1, 103, 103, 1, "claude", "/usr/bin/claude", &["claude"],
+            0,
+            1,
+            103,
+            103,
+            1,
+            "claude",
+            "/usr/bin/claude",
+            &["claude"],
         ))
         .expect("parse")
         .to_owned();
         norm.apply(1, &exec);
         let unlink = veriskein_proto::parse(&build_file_unlink_event_bytes(
-            0, 2, 103, 103, 1, "claude", -100, 0, "/tmp/outside.txt",
+            0,
+            2,
+            103,
+            103,
+            1,
+            "claude",
+            -100,
+            0,
+            "/tmp/outside.txt",
         ))
         .expect("parse")
         .to_owned();
         let events = norm.apply(2, &unlink);
         match &events[0].data {
-            NormalizedData::FileUnlink { path } => assert!(path.workspace.is_none()),
+            NormalizedData::FileUnlink { path, .. } => assert!(path.workspace.is_none()),
             _ => panic!("expected unlink"),
+        }
+    }
+
+    #[test]
+    fn traversal_cleanup_on_relative_path() {
+        let mut norm = normalizer();
+        let exec = veriskein_proto::parse(&build_exec_event_bytes(
+            0,
+            1,
+            104,
+            104,
+            1,
+            "claude",
+            "/usr/bin/claude",
+            &["claude"],
+        ))
+        .expect("parse")
+        .to_owned();
+        norm.apply(1, &exec);
+        let chdir = veriskein_proto::parse(&build_proc_chdir_event_bytes(
+            0,
+            2,
+            104,
+            104,
+            1,
+            "claude",
+            "/tmp/veriskein-ws/subdir/nested",
+        ))
+        .expect("parse")
+        .to_owned();
+        norm.apply(2, &chdir);
+        let open = veriskein_proto::parse(&build_file_open_event_bytes(
+            0,
+            3,
+            104,
+            104,
+            1,
+            "claude",
+            -100,
+            3,
+            "../file.txt",
+        ))
+        .expect("parse")
+        .to_owned();
+        let events = norm.apply(3, &open);
+        match &events[0].data {
+            NormalizedData::FileOpen { path, .. } => {
+                assert_eq!(
+                    path.resolution.lexical,
+                    PathBuf::from("/tmp/veriskein-ws/subdir/file.txt")
+                );
+            }
+            _ => panic!("expected open"),
+        }
+    }
+
+    #[test]
+    fn rename_resolves_old_and_new_paths() {
+        let mut norm = normalizer();
+        let exec = veriskein_proto::parse(&build_exec_event_bytes(
+            0,
+            1,
+            105,
+            105,
+            1,
+            "claude",
+            "/usr/bin/claude",
+            &["claude"],
+        ))
+        .expect("parse")
+        .to_owned();
+        norm.apply(1, &exec);
+        let rename = veriskein_proto::parse(&build_file_rename_event_bytes(
+            0,
+            2,
+            105,
+            105,
+            1,
+            "claude",
+            -100,
+            -100,
+            0,
+            "inside.txt",
+            "../outside.txt",
+        ))
+        .expect("parse")
+        .to_owned();
+        let events = norm.apply(2, &rename);
+        match &events[0].data {
+            NormalizedData::FileRename {
+                rename_ret,
+                old_path,
+                new_path,
+            } => {
+                assert_eq!(*rename_ret, 0);
+                assert!(
+                    old_path
+                        .resolution
+                        .lexical
+                        .ends_with("/tmp/veriskein-ws/inside.txt")
+                );
+                assert_eq!(
+                    new_path.resolution.lexical,
+                    PathBuf::from("/tmp/outside.txt")
+                );
+            }
+            _ => panic!("expected rename"),
+        }
+    }
+
+    #[test]
+    fn bootstrap_procfs_seeds_fd_based_relative_resolution() {
+        let temp = TempDir::new().expect("tempdir");
+        let proc_root = temp.path().join("proc");
+        let workspace_root = temp.path().join("ws");
+        let dirfd_root = workspace_root.join("nested");
+        let pid_dir = proc_root.join("4242");
+        fs::create_dir_all(pid_dir.join("fd")).expect("fd dir");
+        fs::create_dir_all(&dirfd_root).expect("workspace dir");
+        fs::write(pid_dir.join("comm"), b"claude\n").expect("comm");
+        fs::write(pid_dir.join("cmdline"), b"claude\0--json\0").expect("cmdline");
+        fs::write(pid_dir.join("status"), "Name:\tclaude\nPPid:\t1\n").expect("status");
+        symlink(&workspace_root, pid_dir.join("cwd")).expect("cwd");
+        symlink("/usr/bin/claude", pid_dir.join("exe")).expect("exe");
+        symlink(&dirfd_root, pid_dir.join("fd/9")).expect("dirfd");
+
+        let sensitive = SensitiveConfig::from_toml_str("").expect("config");
+        let workspaces = load_workspaces(std::slice::from_ref(&workspace_root)).expect("ws");
+        let mut norm = Normalizer {
+            sensitive,
+            workspaces,
+            processes: BTreeMap::new(),
+        };
+        norm.bootstrap_procfs_from(&proc_root);
+
+        let open = veriskein_proto::parse(&build_file_open_event_bytes(
+            0,
+            1,
+            4242,
+            4242,
+            1,
+            "claude",
+            9,
+            3,
+            "artifact.txt",
+        ))
+        .expect("parse")
+        .to_owned();
+        let events = norm.apply(1, &open);
+        match &events[0].data {
+            NormalizedData::FileOpen { path, .. } => {
+                assert_eq!(path.resolution.lexical, dirfd_root.join("artifact.txt"));
+            }
+            _ => panic!("expected open"),
         }
     }
 }
