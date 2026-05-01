@@ -1,0 +1,3 @@
+id = "A"
+timeout = "30s"
+workspace = "/tmp/ws"
