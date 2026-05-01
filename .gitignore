@@ -1,0 +1,6 @@
+.vscode/
+target/
+
+impl_docs/
+requirements.txt
+AGENTS.md

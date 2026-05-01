@@ -1,0 +1,22 @@
+[package]
+name = "veriskein-bpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+libbpf-rs.workspace = true
+libc.workspace = true
+tracing.workspace = true
+veriskein-proto = { path = "../veriskein-proto" }
+
+[build-dependencies]
+anyhow.workspace = true
+libbpf-cargo.workspace = true
+
+[lints]
+workspace = true
