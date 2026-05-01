@@ -36,7 +36,7 @@ fn detect_unexpected_shell(
     graph: &GraphState,
     binding: Option<&Attribution>,
 ) -> Option<Finding> {
-    let binding = binding?;
+    let binding = session_binding(binding)?;
     let (filename, argv) = match &event.data {
         NormalizedData::ProcExec { filename, argv } => (filename, argv),
         _ => return None,
@@ -48,7 +48,9 @@ fn detect_unexpected_shell(
     if !matches!(shell_name, "sh" | "bash" | "zsh" | "dash" | "fish") {
         return None;
     }
-    if graph.shell_allowlist().is_match(filename) || graph.shell_allowlist().is_match(shell_name) {
+    if allowlisted(graph.shell_allowlist(), filename)
+        || allowlisted(graph.shell_allowlist(), shell_name)
+    {
         return None;
     }
     Some(base_finding(
@@ -70,28 +72,39 @@ fn detect_sensitive_file_access(
     graph: &GraphState,
     binding: Option<&Attribution>,
 ) -> Option<Finding> {
-    let binding = binding?;
+    let binding = session_binding(binding)?;
     let (path_ctx, ret_fd) = match &event.data {
         NormalizedData::FileOpen { path, ret_fd } => (path, *ret_fd),
         _ => return None,
     };
-    if ret_fd < 0 || path_ctx.sensitive_rule.is_none() {
+    if path_ctx.sensitive_rule.is_none() {
         return None;
     }
     let path = preferred_path(path_ctx);
-    if graph.sensitive_allowlist().is_match(&path) {
+    if allowlisted(graph.sensitive_allowlist(), &path) {
         return None;
     }
+    let (reason_code, summary) = if ret_fd >= 0 {
+        (
+            if path_ctx.resolution.mode == PathResolutionMode::Canonicalized {
+                "sensitive_file_open"
+            } else {
+                "sensitive_file_open_lexical"
+            },
+            format!("session opened sensitive path {path}"),
+        )
+    } else {
+        (
+            "sensitive_file_open_denied",
+            format!("session attempted sensitive path {path}"),
+        )
+    };
     Some(base_finding(
         event,
         binding,
         FindingType::SensitiveFileAccess,
-        if path_ctx.resolution.mode == PathResolutionMode::Canonicalized {
-            "sensitive_file_open"
-        } else {
-            "sensitive_file_open_lexical"
-        },
-        format!("session opened sensitive path {path}"),
+        reason_code,
+        summary,
         vec![path.clone()],
         event.process.argv.clone(),
         "file_access",
@@ -105,7 +118,7 @@ fn detect_out_of_workspace_deletion(
     graph: &GraphState,
     binding: Option<&Attribution>,
 ) -> Option<Finding> {
-    let binding = binding?;
+    let binding = session_binding(binding)?;
     match &event.data {
         NormalizedData::FileUnlink { unlink_ret, path } => {
             if *unlink_ret != 0 {
@@ -114,7 +127,7 @@ fn detect_out_of_workspace_deletion(
             let preferred = preferred_path(path);
             if event.process.exe.is_empty()
                 || path.workspace.is_some()
-                || graph.delete_allowlist().is_match(&preferred)
+                || allowlisted(graph.delete_allowlist(), &preferred)
             {
                 return None;
             }
@@ -140,7 +153,7 @@ fn detect_out_of_workspace_deletion(
                 return None;
             }
             let preferred = preferred_path(new_path);
-            if new_path.workspace.is_some() || graph.delete_allowlist().is_match(&preferred) {
+            if new_path.workspace.is_some() || allowlisted(graph.delete_allowlist(), &preferred) {
                 return None;
             }
             Some(base_finding(
@@ -161,7 +174,7 @@ fn detect_out_of_workspace_deletion(
 }
 
 fn detect_exec_observed(event: &NormalizedEvent, binding: Option<&Attribution>) -> Option<Finding> {
-    let binding = binding?;
+    let binding = session_binding(binding)?;
     let (filename, argv) = match &event.data {
         NormalizedData::ProcExec { filename, argv } => (filename, argv),
         _ => return None,
@@ -178,6 +191,14 @@ fn detect_exec_observed(event: &NormalizedEvent, binding: Option<&Attribution>) 
         Some(filename.clone()),
         None,
     ))
+}
+
+fn session_binding(binding: Option<&Attribution>) -> Option<&Attribution> {
+    binding
+}
+
+fn allowlisted(globs: &veriskein_normalizer::GlobList, value: &str) -> bool {
+    globs.is_match(value)
 }
 
 fn base_finding(

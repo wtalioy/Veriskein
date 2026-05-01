@@ -116,6 +116,33 @@ fn sensitive_access_fires() {
 }
 
 #[test]
+fn denied_sensitive_access_still_fires() {
+    let graph = graph();
+    let event = NormalizedEvent {
+        ingest_seq: 2,
+        event_id: "open-denied".to_string(),
+        ts_ns: 2,
+        kind: EventKind::FileOpen,
+        process: ProcessSnapshot {
+            pid: 10,
+            tid: 10,
+            ppid: 1,
+            exe: "/usr/bin/claude".to_string(),
+            comm: "claude".to_string(),
+            argv: vec!["claude".to_string()],
+            cwd: "/tmp/ws".into(),
+        },
+        data: NormalizedData::FileOpen {
+            ret_fd: -13,
+            path: path_context("/etc/shadow", None, true),
+        },
+    };
+    let findings = detect(&event, &graph, false);
+    assert_eq!(findings[0].finding_type, FindingType::SensitiveFileAccess);
+    assert_eq!(findings[0].reason_code, "sensitive_file_open_denied");
+}
+
+#[test]
 fn benign_shell_negative_when_not_in_session() {
     let graph = GraphState::new(
         AgentConfig {
