@@ -59,6 +59,8 @@ plain_struct!(ProcExitEvent {
 });
 
 plain_struct!(ProcChdirEvent {
+    dirfd: i32,
+    _pad: u32,
     path_len: u32,
     path: [u8; defaults::PATH_INLINE_MAX]
 });

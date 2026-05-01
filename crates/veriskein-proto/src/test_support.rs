@@ -83,6 +83,8 @@ pub fn build_proc_chdir_event_bytes(
 ) -> Vec<u8> {
     let mut event = ProcChdirEvent {
         header: base_header(cpu, seq, EventKind::ProcChdir, pid, tid, ppid, comm, 0),
+        dirfd: -100,
+        _pad: 0,
         path_len: path.len() as u32,
         path: [0; defaults::PATH_INLINE_MAX],
     };

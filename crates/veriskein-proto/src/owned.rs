@@ -26,6 +26,7 @@ pub struct OwnedProcExitEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OwnedProcChdirEvent {
     pub header: EventHeader,
+    pub dirfd: i32,
     pub path: String,
 }
 
@@ -202,6 +203,7 @@ impl<'a> EventRef<'a> {
             }),
             Self::ProcChdir(evt) => OwnedEvent::ProcChdir(OwnedProcChdirEvent {
                 header: evt.header,
+                dirfd: evt.dirfd,
                 path: crate::parse_c_string(&evt.path),
             }),
             Self::FdDup(evt) => OwnedEvent::FdDup(OwnedFdDupEvent {

@@ -32,10 +32,10 @@ impl ProcfsExecSnapshot {
 }
 
 fn apply_procfs_snapshot(exec: &mut OwnedProcExecEvent, snapshot: ProcfsExecSnapshot) {
-    if !snapshot.exe_path.is_empty() {
+    if exec.filename.is_empty() && !snapshot.exe_path.is_empty() {
         exec.filename = snapshot.exe_path;
     }
-    if !snapshot.argv.is_empty() {
+    if exec.argv.is_empty() && !snapshot.argv.is_empty() {
         exec.argv = snapshot.argv;
     }
 }
@@ -58,8 +58,8 @@ mod tests {
     fn procfs_snapshot_applies_real_exec_details() {
         let mut event = veriskein_proto::OwnedProcExecEvent {
             header: EventHeader::default(),
-            filename: "bash".to_string(),
-            argv: vec!["bash".to_string()],
+            filename: String::new(),
+            argv: Vec::new(),
         };
         apply_procfs_snapshot(
             &mut event,
