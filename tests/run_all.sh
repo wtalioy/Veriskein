@@ -9,6 +9,7 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 CARGO_BIN="${CARGO_BIN:-$(command -v cargo || true)}"
 DAEMON_BIN="${ROOT_DIR}/target/debug/veriskein-daemon"
 TEST_BIN="${ROOT_DIR}/target/debug/veriskein-test"
+SCENARIO_TIMEOUT_SECS="${SCENARIO_TIMEOUT_SECS:-20}"
 
 if [[ -z "${CARGO_BIN}" ]]; then
   if [[ -n "${SUDO_USER:-}" ]] && [[ -x "/home/${SUDO_USER}/.cargo/bin/cargo" ]]; then
@@ -56,6 +57,8 @@ run_scenario() {
   local daemon_log="${run_dir}/daemon.log"
   local daemon_pid=""
 
+  echo "RUN ${slug}"
+
   mkdir -p "${workspace}" "${scratch}" "${config_root}/config"
   cp "${ROOT_DIR}/config/"*.toml "${config_root}/config/"
 
@@ -75,7 +78,7 @@ run_scenario() {
   VERISKEIN_CONFIG_ROOT="${config_root}" "${DAEMON_BIN}" \
     --workspace "${workspace}" \
     --alert-output "${alerts}" \
-    >"${daemon_log}" 2>&1 &
+    >"${daemon_log}" 2>&1 </dev/null &
   daemon_pid="$!"
 
   sleep 2
@@ -86,7 +89,7 @@ run_scenario() {
     return 1
   fi
 
-  "${scenario_dir}/run.sh"
+  timeout "${SCENARIO_TIMEOUT_SECS}s" "${scenario_dir}/run.sh" </dev/null
   sleep 1
 
   kill -TERM "${daemon_pid}"

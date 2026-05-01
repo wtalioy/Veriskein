@@ -7,6 +7,8 @@ use veriskein_proto::EventKind;
 
 use crate::{FindingType, detect};
 
+const TEST_PID: u32 = 10;
+
 fn graph() -> GraphState {
     let mut graph = GraphState::new(
         AgentConfig {
@@ -22,27 +24,28 @@ fn graph() -> GraphState {
         }],
     )
     .expect("graph");
-    let exec = NormalizedEvent {
-        ingest_seq: 1,
-        event_id: "seed".to_string(),
-        ts_ns: 1,
-        kind: EventKind::ProcExec,
-        process: ProcessSnapshot {
-            pid: 10,
-            tid: 10,
-            ppid: 1,
-            exe: "/usr/bin/claude".to_string(),
-            comm: "claude".to_string(),
-            argv: vec!["claude".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::ProcExec {
+    graph.apply(&event(
+        EventKind::ProcExec,
+        "seed",
+        process(TEST_PID, "/usr/bin/claude", "claude", "/tmp/ws"),
+        NormalizedData::ProcExec {
             filename: "/usr/bin/claude".to_string(),
             argv: vec!["claude".to_string()],
         },
-    };
-    graph.apply(&exec);
+    ));
     graph
+}
+
+fn process(pid: u32, exe: &str, comm: &str, cwd: &str) -> ProcessSnapshot {
+    ProcessSnapshot {
+        pid,
+        tid: pid,
+        ppid: 1,
+        exe: exe.to_string(),
+        comm: comm.to_string(),
+        argv: vec![comm.to_string()],
+        cwd: cwd.into(),
+    }
 }
 
 fn path_context(path: &str, workspace: Option<&str>, sensitive: bool) -> PathContext {
@@ -63,81 +66,73 @@ fn path_context(path: &str, workspace: Option<&str>, sensitive: bool) -> PathCon
     }
 }
 
+fn event(
+    kind: EventKind,
+    event_id: &str,
+    process: ProcessSnapshot,
+    data: NormalizedData,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        ingest_seq: 2,
+        event_id: event_id.to_string(),
+        ts_ns: 2,
+        kind,
+        process,
+        data,
+    }
+}
+
 #[test]
 fn unexpected_shell_fires() {
-    let graph = graph();
-    let event = NormalizedEvent {
-        ingest_seq: 2,
-        event_id: "shell".to_string(),
-        ts_ns: 2,
-        kind: EventKind::ProcExec,
-        process: ProcessSnapshot {
-            pid: 10,
-            tid: 10,
-            ppid: 1,
-            exe: "/bin/sh".to_string(),
-            comm: "sh".to_string(),
-            argv: vec!["sh".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::ProcExec {
-            filename: "/bin/sh".to_string(),
-            argv: vec!["sh".to_string()],
-        },
-    };
-    let findings = detect(&event, &graph, false);
+    let findings = detect(
+        &event(
+            EventKind::ProcExec,
+            "shell",
+            process(TEST_PID, "/bin/sh", "sh", "/tmp/ws"),
+            NormalizedData::ProcExec {
+                filename: "/bin/sh".to_string(),
+                argv: vec!["sh".to_string()],
+            },
+        ),
+        &graph(),
+        false,
+    );
     assert_eq!(findings[0].finding_type, FindingType::UnexpectedShell);
 }
 
 #[test]
 fn sensitive_access_fires() {
-    let graph = graph();
-    let event = NormalizedEvent {
-        ingest_seq: 2,
-        event_id: "open".to_string(),
-        ts_ns: 2,
-        kind: EventKind::FileOpen,
-        process: ProcessSnapshot {
-            pid: 10,
-            tid: 10,
-            ppid: 1,
-            exe: "/usr/bin/claude".to_string(),
-            comm: "claude".to_string(),
-            argv: vec!["claude".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::FileOpen {
-            ret_fd: 3,
-            path: path_context("/etc/shadow", None, true),
-        },
-    };
-    let findings = detect(&event, &graph, false);
+    let findings = detect(
+        &event(
+            EventKind::FileOpen,
+            "open",
+            process(TEST_PID, "/usr/bin/claude", "claude", "/tmp/ws"),
+            NormalizedData::FileOpen {
+                ret_fd: 3,
+                path: path_context("/etc/shadow", None, true),
+            },
+        ),
+        &graph(),
+        false,
+    );
     assert_eq!(findings[0].finding_type, FindingType::SensitiveFileAccess);
 }
 
 #[test]
 fn denied_sensitive_access_still_fires() {
-    let graph = graph();
-    let event = NormalizedEvent {
-        ingest_seq: 2,
-        event_id: "open-denied".to_string(),
-        ts_ns: 2,
-        kind: EventKind::FileOpen,
-        process: ProcessSnapshot {
-            pid: 10,
-            tid: 10,
-            ppid: 1,
-            exe: "/usr/bin/claude".to_string(),
-            comm: "claude".to_string(),
-            argv: vec!["claude".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::FileOpen {
-            ret_fd: -13,
-            path: path_context("/etc/shadow", None, true),
-        },
-    };
-    let findings = detect(&event, &graph, false);
+    let findings = detect(
+        &event(
+            EventKind::FileOpen,
+            "open-denied",
+            process(TEST_PID, "/usr/bin/claude", "claude", "/tmp/ws"),
+            NormalizedData::FileOpen {
+                ret_fd: -13,
+                path: path_context("/etc/shadow", None, true),
+            },
+        ),
+        &graph(),
+        false,
+    );
     assert_eq!(findings[0].finding_type, FindingType::SensitiveFileAccess);
     assert_eq!(findings[0].reason_code, "sensitive_file_open_denied");
 }
@@ -158,26 +153,22 @@ fn benign_shell_negative_when_not_in_session() {
         }],
     )
     .expect("graph");
-    let event = NormalizedEvent {
-        ingest_seq: 2,
-        event_id: "shell".to_string(),
-        ts_ns: 2,
-        kind: EventKind::ProcExec,
-        process: ProcessSnapshot {
-            pid: 99,
-            tid: 99,
-            ppid: 1,
-            exe: "/bin/bash".to_string(),
-            comm: "bash".to_string(),
-            argv: vec!["bash".to_string()],
-            cwd: "/tmp".into(),
-        },
-        data: NormalizedData::ProcExec {
-            filename: "/bin/bash".to_string(),
-            argv: vec!["bash".to_string()],
-        },
-    };
-    assert!(detect(&event, &graph, false).is_empty());
+    assert!(
+        detect(
+            &event(
+                EventKind::ProcExec,
+                "shell",
+                process(99, "/bin/bash", "bash", "/tmp"),
+                NormalizedData::ProcExec {
+                    filename: "/bin/bash".to_string(),
+                    argv: vec!["bash".to_string()],
+                },
+            ),
+            &graph,
+            false,
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -196,122 +187,89 @@ fn delete_allowlist_uses_glob() {
         }],
     )
     .expect("graph");
-    let exec = NormalizedEvent {
-        ingest_seq: 1,
-        event_id: "seed".to_string(),
-        ts_ns: 1,
-        kind: EventKind::ProcExec,
-        process: ProcessSnapshot {
-            pid: 11,
-            tid: 11,
-            ppid: 1,
-            exe: "/usr/bin/claude".to_string(),
-            comm: "claude".to_string(),
-            argv: vec!["claude".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::ProcExec {
+    graph.apply(&event(
+        EventKind::ProcExec,
+        "seed",
+        process(11, "/usr/bin/claude", "claude", "/tmp/ws"),
+        NormalizedData::ProcExec {
             filename: "/usr/bin/claude".to_string(),
             argv: vec!["claude".to_string()],
         },
-    };
-    graph.apply(&exec);
-    let event = NormalizedEvent {
-        ingest_seq: 2,
-        event_id: "unlink".to_string(),
-        ts_ns: 2,
-        kind: EventKind::FileUnlink,
-        process: ProcessSnapshot {
-            pid: 11,
-            tid: 11,
-            ppid: 1,
-            exe: "/usr/bin/claude".to_string(),
-            comm: "claude".to_string(),
-            argv: vec!["claude".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::FileUnlink {
-            unlink_ret: 0,
-            path: path_context("/tmp/allowed/file.txt", None, false),
-        },
-    };
-    assert!(detect(&event, &graph, false).is_empty());
+    ));
+    assert!(
+        detect(
+            &event(
+                EventKind::FileUnlink,
+                "unlink",
+                process(11, "/usr/bin/claude", "claude", "/tmp/ws"),
+                NormalizedData::FileUnlink {
+                    unlink_ret: 0,
+                    path: path_context("/tmp/allowed/file.txt", None, false),
+                },
+            ),
+            &graph,
+            false,
+        )
+        .is_empty()
+    );
 }
 
 #[test]
 fn failed_unlink_does_not_alert() {
-    let graph = graph();
-    let event = NormalizedEvent {
-        ingest_seq: 2,
-        event_id: "unlink-fail".to_string(),
-        ts_ns: 2,
-        kind: EventKind::FileUnlink,
-        process: ProcessSnapshot {
-            pid: 10,
-            tid: 10,
-            ppid: 1,
-            exe: "/usr/bin/claude".to_string(),
-            comm: "claude".to_string(),
-            argv: vec!["claude".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::FileUnlink {
-            unlink_ret: -1,
-            path: path_context("/tmp/outside.txt", None, false),
-        },
-    };
-    assert!(detect(&event, &graph, false).is_empty());
+    assert!(
+        detect(
+            &event(
+                EventKind::FileUnlink,
+                "unlink-fail",
+                process(TEST_PID, "/usr/bin/claude", "claude", "/tmp/ws"),
+                NormalizedData::FileUnlink {
+                    unlink_ret: -1,
+                    path: path_context("/tmp/outside.txt", None, false),
+                },
+            ),
+            &graph(),
+            false,
+        )
+        .is_empty()
+    );
 }
 
 #[test]
 fn failed_rename_does_not_alert() {
-    let graph = graph();
-    let event = NormalizedEvent {
-        ingest_seq: 2,
-        event_id: "rename-fail".to_string(),
-        ts_ns: 2,
-        kind: EventKind::FileRename,
-        process: ProcessSnapshot {
-            pid: 10,
-            tid: 10,
-            ppid: 1,
-            exe: "/usr/bin/claude".to_string(),
-            comm: "claude".to_string(),
-            argv: vec!["claude".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::FileRename {
-            rename_ret: -1,
-            old_path: path_context("/tmp/ws/inside.txt", Some("/tmp/ws"), false),
-            new_path: path_context("/tmp/outside.txt", None, false),
-        },
-    };
-    assert!(detect(&event, &graph, false).is_empty());
+    assert!(
+        detect(
+            &event(
+                EventKind::FileRename,
+                "rename-fail",
+                process(TEST_PID, "/usr/bin/claude", "claude", "/tmp/ws"),
+                NormalizedData::FileRename {
+                    rename_ret: -1,
+                    old_path: path_context("/tmp/ws/inside.txt", Some("/tmp/ws"), false),
+                    new_path: path_context("/tmp/outside.txt", None, false),
+                },
+            ),
+            &graph(),
+            false,
+        )
+        .is_empty()
+    );
 }
 
 #[test]
 fn successful_outside_workspace_delete_alerts() {
-    let graph = graph();
-    let event = NormalizedEvent {
-        ingest_seq: 2,
-        event_id: "unlink-ok".to_string(),
-        ts_ns: 2,
-        kind: EventKind::FileUnlink,
-        process: ProcessSnapshot {
-            pid: 10,
-            tid: 10,
-            ppid: 1,
-            exe: "/usr/bin/claude".to_string(),
-            comm: "claude".to_string(),
-            argv: vec!["claude".to_string()],
-            cwd: "/tmp/ws".into(),
-        },
-        data: NormalizedData::FileUnlink {
-            unlink_ret: 0,
-            path: path_context("/tmp/outside.txt", None, false),
-        },
-    };
-    let findings = detect(&event, &graph, false);
+    let findings = detect(
+        &event(
+            EventKind::FileUnlink,
+            "unlink-ok",
+            process(TEST_PID, "/usr/bin/claude", "claude", "/tmp/ws"),
+            NormalizedData::FileUnlink {
+                unlink_ret: 0,
+                path: path_context("/tmp/outside.txt", None, false),
+            },
+        ),
+        &graph(),
+        false,
+    );
     assert_eq!(
         findings[0].finding_type,
         FindingType::OutOfWorkspaceDeletion

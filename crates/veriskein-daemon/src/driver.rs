@@ -118,6 +118,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -162,9 +163,8 @@ mod tests {
     const TEST_ROOT_PID: u32 = 900_100;
     const TEST_CHILD_PID: u32 = 900_101;
 
-    #[tokio::test]
-    async fn driver_emits_schema_valid_exec_observed_alert() {
-        let source = FakeSource::new(vec![build_exec_event_bytes(
+    fn seeded_exec_bytes() -> Vec<u8> {
+        build_exec_event_bytes(
             0,
             1,
             TEST_ROOT_PID,
@@ -173,9 +173,13 @@ mod tests {
             "claude",
             "/usr/bin/claude",
             &["claude"],
-        )]);
+        )
+    }
+
+    async fn drive_alerts(events: Vec<Vec<u8>>, dry_run: bool) -> Vec<Value> {
         let file = NamedTempFile::new().expect("temp file");
-        let path = file.path().to_path_buf();
+        let path: PathBuf = file.path().to_path_buf();
+        let source = FakeSource::new(events);
         let sink = open_sink(Some(&path)).expect("open sink");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -185,7 +189,7 @@ mod tests {
                 sink,
                 Cli {
                     workspaces: vec!["/tmp/ws".into()],
-                    dry_run: true,
+                    dry_run,
                     alert_output: None,
                 },
                 &config_root(),
@@ -197,142 +201,94 @@ mod tests {
         let _ = shutdown_tx.send(());
         handle.await.expect("join").expect("driver ok");
 
-        let text = std::fs::read_to_string(path).expect("read output");
-        let line = text.lines().next().expect("one alert line");
-        let value: Value = serde_json::from_str(line).expect("json line");
-        veriskein_alert::validate(&value).expect("schema valid");
-        assert_eq!(value["type"], "exec_observed");
-        assert_eq!(value["objects"]["argv"][0], "claude");
+        std::fs::read_to_string(path)
+            .expect("read output")
+            .lines()
+            .map(|line| {
+                let value: Value = serde_json::from_str(line).expect("json line");
+                veriskein_alert::validate(&value).expect("schema valid");
+                value
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn driver_emits_schema_valid_exec_observed_alert() {
+        let values = drive_alerts(vec![seeded_exec_bytes()], true).await;
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0]["type"], "exec_observed");
+        assert_eq!(values[0]["objects"]["argv"][0], "claude");
     }
 
     #[tokio::test]
     async fn driver_emits_unexpected_shell_alert() {
-        let source = FakeSource::new(vec![
-            build_exec_event_bytes(
-                0,
-                1,
-                TEST_ROOT_PID,
-                TEST_ROOT_PID,
-                1,
-                "claude",
-                "/usr/bin/claude",
-                &["claude"],
-            ),
-            build_proc_fork_event_bytes(
-                0,
-                2,
-                TEST_ROOT_PID,
-                TEST_ROOT_PID,
-                1,
-                "claude",
-                TEST_CHILD_PID,
-                TEST_CHILD_PID,
-            ),
-            build_exec_event_bytes(
-                0,
-                3,
-                TEST_CHILD_PID,
-                TEST_CHILD_PID,
-                TEST_ROOT_PID,
-                "sh",
-                "/bin/sh",
-                &["sh", "-lc", "echo"],
-            ),
-        ]);
-        let file = NamedTempFile::new().expect("temp file");
-        let path = file.path().to_path_buf();
-        let sink = open_sink(Some(&path)).expect("open sink");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(async move {
-            run_with_source_and_sink(
-                source,
-                sink,
-                Cli {
-                    workspaces: vec!["/tmp/ws".into()],
-                    dry_run: false,
-                    alert_output: None,
-                },
-                &config_root(),
-                shutdown_rx,
-            )
-            .await
-        });
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let _ = shutdown_tx.send(());
-        handle.await.expect("join").expect("driver ok");
-
-        let text = std::fs::read_to_string(path).expect("read output");
-        assert!(text.lines().any(|line| {
-            serde_json::from_str::<Value>(line)
-                .map(|value| value["type"] == "unexpected_shell")
-                .unwrap_or(false)
-        }));
+        let values = drive_alerts(
+            vec![
+                seeded_exec_bytes(),
+                build_proc_fork_event_bytes(
+                    0,
+                    2,
+                    TEST_ROOT_PID,
+                    TEST_ROOT_PID,
+                    1,
+                    "claude",
+                    TEST_CHILD_PID,
+                    TEST_CHILD_PID,
+                ),
+                build_exec_event_bytes(
+                    0,
+                    3,
+                    TEST_CHILD_PID,
+                    TEST_CHILD_PID,
+                    TEST_ROOT_PID,
+                    "sh",
+                    "/bin/sh",
+                    &["sh", "-lc", "echo"],
+                ),
+            ],
+            false,
+        )
+        .await;
+        assert!(
+            values
+                .iter()
+                .any(|value| value["type"] == "unexpected_shell")
+        );
     }
 
     #[tokio::test]
     async fn driver_emits_sensitive_and_outside_workspace_alerts() {
-        let source = FakeSource::new(vec![
-            build_exec_event_bytes(
-                0,
-                1,
-                TEST_ROOT_PID,
-                TEST_ROOT_PID,
-                1,
-                "claude",
-                "/usr/bin/claude",
-                &["claude"],
-            ),
-            build_file_open_event_bytes(
-                0,
-                2,
-                TEST_ROOT_PID,
-                TEST_ROOT_PID,
-                1,
-                "claude",
-                -100,
-                3,
-                "/etc/shadow",
-            ),
-            build_file_unlink_event_bytes(
-                0,
-                3,
-                TEST_ROOT_PID,
-                TEST_ROOT_PID,
-                1,
-                "claude",
-                -100,
-                0,
-                "/tmp/outside.txt",
-            ),
-        ]);
-        let file = NamedTempFile::new().expect("temp file");
-        let path = file.path().to_path_buf();
-        let sink = open_sink(Some(&path)).expect("open sink");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(async move {
-            run_with_source_and_sink(
-                source,
-                sink,
-                Cli {
-                    workspaces: vec!["/tmp/ws".into()],
-                    dry_run: false,
-                    alert_output: None,
-                },
-                &config_root(),
-                shutdown_rx,
-            )
-            .await
-        });
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let _ = shutdown_tx.send(());
-        handle.await.expect("join").expect("driver ok");
-
-        let text = std::fs::read_to_string(path).expect("read output");
-        let kinds: Vec<String> = text
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        let values = drive_alerts(
+            vec![
+                seeded_exec_bytes(),
+                build_file_open_event_bytes(
+                    0,
+                    2,
+                    TEST_ROOT_PID,
+                    TEST_ROOT_PID,
+                    1,
+                    "claude",
+                    -100,
+                    3,
+                    "/etc/shadow",
+                ),
+                build_file_unlink_event_bytes(
+                    0,
+                    3,
+                    TEST_ROOT_PID,
+                    TEST_ROOT_PID,
+                    1,
+                    "claude",
+                    -100,
+                    0,
+                    "/tmp/outside.txt",
+                ),
+            ],
+            false,
+        )
+        .await;
+        let kinds: Vec<String> = values
+            .iter()
             .filter_map(|value| value["type"].as_str().map(ToOwned::to_owned))
             .collect();
         assert!(kinds.contains(&"sensitive_file_access".to_string()));

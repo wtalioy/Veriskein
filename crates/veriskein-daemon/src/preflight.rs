@@ -32,7 +32,9 @@ impl PreflightError {
 pub fn preflight(cli: &Cli) -> Result<(), PreflightError> {
     check_kernel_release(&read_kernel_release()?)?;
     check_btf_path(Path::new("/sys/kernel/btf/vmlinux"))?;
-    check_tracefs_path(Path::new("/sys/kernel/tracing/events/sched/sched_process_exec/id"))?;
+    check_tracefs_path(Path::new(
+        "/sys/kernel/tracing/events/sched/sched_process_exec/id",
+    ))?;
     ensure_memlock_limit().map_err(|_| PreflightError::Memlock)?;
     ensure_capabilities()?;
     let config_root = resolve_config_root().map_err(|_| PreflightError::MissingWorkspace)?;
