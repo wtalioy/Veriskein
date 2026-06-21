@@ -15,6 +15,8 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 veriskein-alert = { path = "../veriskein-alert" }
+veriskein-content = { path = "../veriskein-content" }
+veriskein-correlator = { path = "../veriskein-correlator" }
 veriskein-detectors = { path = "../veriskein-detectors" }
 veriskein-graph = { path = "../veriskein-graph" }
 veriskein-normalizer = { path = "../veriskein-normalizer" }

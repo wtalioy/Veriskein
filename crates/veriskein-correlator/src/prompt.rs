@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 use veriskein_proto::{AgentId, ContentChannel, PromptId, SessionId, VisibilityState, defaults};
 
+use crate::matching::ContentSignature;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptInput {
     pub session_id: SessionId,
@@ -28,6 +30,23 @@ pub(crate) struct PromptObject {
     pub excerpt: Vec<u8>,
     pub hash_exact: [u8; 16],
     pub hash_norm: [u8; 16],
+    #[serde(skip)]
+    pub signature: ContentSignature,
+    pub visibility_state: VisibilityState,
+    pub degraded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSnapshot {
+    pub id: PromptId,
+    pub session_id: SessionId,
+    pub agent_id: Option<AgentId>,
+    pub stream_id: u64,
+    pub capture_mode: ContentChannel,
+    pub ts_start: u64,
+    pub ts_end: u64,
+    pub excerpt: Vec<u8>,
+    pub signature: ContentSignature,
     pub visibility_state: VisibilityState,
     pub degraded: bool,
 }
@@ -81,9 +100,9 @@ pub struct PromptStore {
 
 impl PromptStore {
     pub fn insert(&mut self, input: PromptInput) -> PromptId {
-        let hash_exact = hash16(&input.excerpt);
-        let normalized = normalize_text(&input.excerpt);
-        let hash_norm = hash16(normalized.as_bytes());
+        let signature = ContentSignature::new(&input.excerpt);
+        let hash_exact = signature.hash_exact;
+        let hash_norm = signature.hash_norm;
         let session_id = input.session_id;
         let ts_end = input.ts_end;
         let id = PromptId::from_seed(
@@ -107,6 +126,7 @@ impl PromptStore {
             excerpt: input.excerpt,
             hash_exact,
             hash_norm,
+            signature,
             visibility_state: input.visibility_state,
             degraded: input.degraded,
         };
@@ -115,6 +135,22 @@ impl PromptStore {
         self.by_session.entry(session_id).or_default().push_back(id);
         self.evict_session(session_id, ts_end);
         id
+    }
+
+    pub fn snapshot(&self, id: PromptId) -> Option<PromptSnapshot> {
+        self.prompts.get(&id).map(PromptSnapshot::from)
+    }
+
+    pub fn prompts_for_session(
+        &self,
+        session_id: SessionId,
+    ) -> impl Iterator<Item = PromptSnapshot> + '_ {
+        self.by_session
+            .get(&session_id)
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+            .filter_map(|id| self.prompts.get(id))
+            .map(PromptSnapshot::from)
     }
 
     pub fn link_risky_event(
@@ -273,26 +309,30 @@ fn risk_window_ns(risk_kind: &str) -> Option<u64> {
 }
 
 fn max_prompt_retention_ns() -> u64 {
-    180 * 1_000_000_000
-}
-
-fn normalize_text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn hash16(bytes: &[u8]) -> [u8; 16] {
-    let hash = blake3::hash(bytes);
-    let mut out = [0_u8; 16];
-    out.copy_from_slice(&hash.as_bytes()[..16]);
-    out
+    (defaults::CAPI_WINDOW_MS * 1_000_000)
+        .max(risk_window_ns("single_agent_deadloop").unwrap_or_default())
 }
 
 fn hex16(bytes: [u8; 16]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+impl From<&PromptObject> for PromptSnapshot {
+    fn from(prompt: &PromptObject) -> Self {
+        Self {
+            id: prompt.id,
+            session_id: prompt.session_id,
+            agent_id: prompt.agent_id,
+            stream_id: prompt.stream_id,
+            capture_mode: prompt.capture_mode,
+            ts_start: prompt.ts_start,
+            ts_end: prompt.ts_end,
+            excerpt: prompt.excerpt.clone(),
+            signature: prompt.signature.clone(),
+            visibility_state: prompt.visibility_state,
+            degraded: prompt.degraded,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -403,5 +443,18 @@ mod tests {
         }));
         let latest_hex = latest_id.expect("latest prompt id").hex();
         assert!(evidence.iter().all(|entry| entry.prompt_id == latest_hex));
+    }
+
+    #[test]
+    fn retention_covers_capi_window_after_same_session_evidence_expires() {
+        let session_id = SessionId::from_seed(b"s1");
+        let mut store = PromptStore::default();
+        let prompt_id = store.insert(input(session_id, 0, b"cross-session content"));
+
+        let evidence =
+            store.evidence_for_event(session_id, "evt-risk", 240_000_000_000, "net_connect", 99);
+
+        assert!(evidence.is_empty());
+        assert!(store.snapshot(prompt_id).is_some());
     }
 }

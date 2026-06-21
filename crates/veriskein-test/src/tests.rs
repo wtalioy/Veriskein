@@ -83,6 +83,19 @@ fn evidence_kind_array_requires_all_listed_kinds() {
 }
 
 #[test]
+fn serialized_text_can_be_forbidden() {
+    let absent = parse_match(json!({
+        "not_contains_text": ["sk-test", "root-password"]
+    }));
+    let present = parse_match(json!({
+        "not_contains_text": ["unexpected_shell"]
+    }));
+
+    assert!(absent.matches(&alert()));
+    assert!(!present.matches(&alert()));
+}
+
+#[test]
 fn rejects_non_matching_fields() {
     let spec = parse_match(json!({
         "type": "unexpected_shell",

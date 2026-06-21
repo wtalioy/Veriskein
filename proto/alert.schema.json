@@ -23,6 +23,34 @@
     "policy",
     "capture"
   ],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "type": { "const": "cross_agent_prompt_injection" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "objects": {
+            "required": [
+              "prompt_ids",
+              "artifact_ids",
+              "chain_id",
+              "root_session_id",
+              "downstream_session_id"
+            ],
+            "properties": {
+              "prompt_ids": { "minItems": 1 },
+              "artifact_ids": { "minItems": 1 },
+              "chain_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+              "root_session_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+              "downstream_session_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" }
+            }
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "schema_version": { "type": "integer", "minimum": 1 },
     "alert_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
@@ -33,7 +61,8 @@
         "unexpected_shell",
         "sensitive_file_access",
         "out_of_workspace_deletion",
-        "single_agent_deadloop"
+        "single_agent_deadloop",
+        "cross_agent_prompt_injection"
       ]
     },
     "severity": { "enum": ["low", "medium", "high", "critical"] },
@@ -53,7 +82,13 @@
         "paths": { "type": "array", "items": { "type": "string" } },
         "ips": { "type": "array", "items": { "type": "string" }, "default": [] },
         "ports": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 65535 }, "default": [] },
+        "prompt_ids": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "default": [] },
+        "artifact_ids": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "default": [] },
         "event_ids": { "type": "array", "items": { "type": "string" } },
+        "chain_id": { "type": ["string", "null"], "pattern": "^[0-9a-f]{32}$|^$" },
+        "workspace_id": { "type": ["string", "null"] },
+        "root_session_id": { "type": ["string", "null"], "pattern": "^[0-9a-f]{32}$|^$" },
+        "downstream_session_id": { "type": ["string", "null"], "pattern": "^[0-9a-f]{32}$|^$" },
         "argv": { "type": "array", "items": { "type": "string" } }
       }
     },
@@ -66,13 +101,17 @@
         "required": ["kind", "event_id", "ingest_seq"],
         "properties": {
           "kind": {
-            "enum": ["syscall", "file_access", "net_connect", "prompt_ref", "heuristic", "capture_health"]
+            "enum": ["excerpt_match", "syscall", "file_access", "net_connect", "prompt_ref", "artifact_ref", "heuristic", "capture_health"]
           },
           "event_id": { "type": "string", "minLength": 1 },
           "ingest_seq": { "type": "integer", "minimum": 0 },
           "path": { "type": ["string", "null"] },
           "ip": { "type": ["string", "null"] },
           "port": { "type": ["integer", "null"], "minimum": 0, "maximum": 65535 },
+          "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "src": { "type": ["string", "null"] },
+          "dst": { "type": ["string", "null"] },
+          "op": { "type": ["string", "null"] },
           "note": { "type": ["string", "null"] }
         }
       }
@@ -91,20 +130,23 @@
     "policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["detector_version", "policy_version"],
+      "required": ["detector_version", "policy_version", "component_scores"],
       "properties": {
         "detector_version": { "type": "integer", "minimum": 1 },
-        "policy_version": { "type": "integer", "minimum": 1 }
+        "policy_version": { "type": "integer", "minimum": 1 },
+        "component_scores": { "type": "object", "additionalProperties": { "type": "number" } }
       }
     },
     "capture": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "lag_ms"],
+      "required": ["mode", "lag_ms", "redaction"],
       "properties": {
         "mode": { "enum": ["none", "tls"] },
-        "lag_ms": { "type": ["integer", "null"], "minimum": 0 }
+        "lag_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "redaction": { "enum": ["none", "masked"] }
       }
-    }
+    },
+    "explanation": { "type": ["string", "null"], "maxLength": 512 }
   }
 }

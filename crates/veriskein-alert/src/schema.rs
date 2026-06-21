@@ -45,7 +45,13 @@ pub fn sample_alert_value() -> Value {
             "paths": ["/bin/sh"],
             "ips": [],
             "ports": [],
+            "prompt_ids": [],
+            "artifact_ids": [],
             "event_ids": ["f00d"],
+            "chain_id": null,
+            "workspace_id": null,
+            "root_session_id": null,
+            "downstream_session_id": null,
             "argv": ["sh", "-lc", "true"]
         },
         "evidence": [{
@@ -55,6 +61,10 @@ pub fn sample_alert_value() -> Value {
             "path": "/bin/sh",
             "ip": null,
             "port": null,
+            "score": null,
+            "src": null,
+            "dst": null,
+            "op": null,
             "note": null
         }],
         "fallback": {
@@ -65,11 +75,14 @@ pub fn sample_alert_value() -> Value {
         },
         "policy": {
             "detector_version": 1,
-            "policy_version": 1
+            "policy_version": 1,
+            "component_scores": {}
         },
         "capture": {
             "mode": "none",
-            "lag_ms": null
-        }
+            "lag_ms": null,
+            "redaction": "none"
+        },
+        "explanation": null
     })
 }

@@ -25,6 +25,7 @@ pub enum FindingType {
     SensitiveFileAccess,
     OutOfWorkspaceDeletion,
     SingleAgentDeadloop,
+    CrossAgentPromptInjection,
     ExecObserved,
 }
 
@@ -35,6 +36,7 @@ impl FindingType {
             Self::SensitiveFileAccess => "sensitive_file_access",
             Self::OutOfWorkspaceDeletion => "out_of_workspace_deletion",
             Self::SingleAgentDeadloop => "single_agent_deadloop",
+            Self::CrossAgentPromptInjection => "cross_agent_prompt_injection",
             Self::ExecObserved => "exec_observed",
         }
     }
@@ -70,16 +72,22 @@ impl FindingHealth {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct FindingObjects {
     pub paths: Vec<String>,
     pub ips: Vec<String>,
     pub ports: Vec<u16>,
+    pub prompt_ids: Vec<String>,
+    pub artifact_ids: Vec<String>,
     pub event_ids: Vec<String>,
+    pub chain_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub root_session_id: Option<String>,
+    pub downstream_session_id: Option<String>,
     pub argv: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FindingEvidence {
     pub kind: &'static str,
     pub event_id: String,
@@ -87,6 +95,10 @@ pub struct FindingEvidence {
     pub path: Option<String>,
     pub ip: Option<String>,
     pub port: Option<u16>,
+    pub score: Option<f32>,
+    pub src: Option<String>,
+    pub dst: Option<String>,
+    pub op: Option<String>,
     pub note: Option<String>,
 }
 
@@ -113,6 +125,10 @@ impl FindingEvidence {
             path: None,
             ip,
             port,
+            score: None,
+            src: None,
+            dst: None,
+            op: None,
             note: None,
         }
     }
@@ -125,6 +141,10 @@ impl FindingEvidence {
             path,
             ip: None,
             port: None,
+            score: None,
+            src: None,
+            dst: None,
+            op: None,
             note: None,
         }
     }
@@ -137,6 +157,33 @@ impl FindingEvidence {
             path: None,
             ip: None,
             port: None,
+            score: None,
+            src: None,
+            dst: None,
+            op: None,
+            note,
+        }
+    }
+
+    pub fn chain_ref(
+        kind: &'static str,
+        chain_id: String,
+        score: Option<f32>,
+        src: Option<String>,
+        dst: Option<String>,
+        note: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            event_id: chain_id,
+            ingest_seq: 0,
+            path: None,
+            ip: None,
+            port: None,
+            score,
+            src,
+            dst,
+            op: None,
             note,
         }
     }
@@ -160,6 +207,10 @@ impl FindingEvidence {
             path,
             ip,
             port,
+            score: None,
+            src: None,
+            dst: None,
+            op: None,
             note,
         }
     }
@@ -182,4 +233,5 @@ pub struct Finding {
     pub evidence: Vec<FindingEvidence>,
     pub health: FindingHealth,
     pub component_scores: std::collections::BTreeMap<&'static str, f32>,
+    pub explanation: Option<String>,
 }

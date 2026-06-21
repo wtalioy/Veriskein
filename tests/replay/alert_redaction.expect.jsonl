@@ -1,0 +1,1 @@
+{"match":{"type":"cross_agent_prompt_injection","severity_in":["critical"],"confidence_band_in":["strong"],"causal_score_gte":0.70,"objects.chain_id.present":true,"objects.prompt_ids.length_gte":1,"objects.artifact_ids.length_gte":1,"objects.sessions_differ":true,"evidence.has_kind":["excerpt_match","prompt_ref","syscall"],"not_contains_text":["sk-test","alice"]}}

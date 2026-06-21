@@ -37,6 +37,17 @@ pub(super) enum Criterion {
     },
     EvidenceHasKind(String),
     EvidenceHasKinds(Vec<String>),
+    Present {
+        path: Vec<String>,
+        label: String,
+    },
+    NumericGte {
+        path: Vec<String>,
+        label: String,
+        min: f64,
+    },
+    NotContainsText(Vec<String>),
+    SessionsDiffer,
 }
 
 #[derive(Debug, Clone, Copy)]

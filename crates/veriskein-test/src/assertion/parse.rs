@@ -54,6 +54,10 @@ impl<'de> Deserialize<'de> for MatchSpec {
             "fallback.visibility_in",
         )?;
         parser.parse_objects_length_gte()?;
+        parser.parse_present()?;
+        parser.parse_numeric_gte()?;
+        parser.parse_sessions_differ()?;
+        parser.parse_not_contains_text()?;
         parser.finish()
     }
 }
@@ -189,6 +193,103 @@ impl<'a> MatchParser<'a> {
         Ok(())
     }
 
+    fn parse_present<E>(&mut self) -> std::result::Result<(), E>
+    where
+        E: de::Error,
+    {
+        for key in [
+            "objects.chain_id.present",
+            "objects.root_session_id.present",
+            "objects.downstream_session_id.present",
+        ] {
+            let Some(value) = self.root.get(key) else {
+                continue;
+            };
+            if value.as_bool() != Some(true) {
+                return Err(E::custom(format!("{key} only supports true")));
+            }
+            self.used.push(key.to_string());
+            self.criteria.push(Criterion::Present {
+                path: key
+                    .trim_end_matches(".present")
+                    .split('.')
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                label: key.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn parse_numeric_gte<E>(&mut self) -> std::result::Result<(), E>
+    where
+        E: de::Error,
+    {
+        if let Some(value) = self.root.get("causal_score_gte") {
+            self.used.push("causal_score_gte".to_string());
+            self.criteria.push(Criterion::NumericGte {
+                path: vec![
+                    "policy".to_string(),
+                    "component_scores".to_string(),
+                    "causal_score".to_string(),
+                ],
+                min: expect_f64::<E>(value, "causal_score_gte")?,
+                label: "causal_score_gte".to_string(),
+            });
+        }
+        for (key, value) in self.root {
+            let Some(score_name) = key
+                .strip_prefix("policy.component_scores.")
+                .and_then(|remaining| remaining.strip_suffix("_gte"))
+            else {
+                continue;
+            };
+            self.used.push(key.clone());
+            self.criteria.push(Criterion::NumericGte {
+                path: vec![
+                    "policy".to_string(),
+                    "component_scores".to_string(),
+                    score_name.to_string(),
+                ],
+                min: expect_f64::<E>(value, key)?,
+                label: key.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn parse_sessions_differ<E>(&mut self) -> std::result::Result<(), E>
+    where
+        E: de::Error,
+    {
+        let Some(value) = self.root.get("objects.sessions_differ") else {
+            return Ok(());
+        };
+        if value.as_bool() != Some(true) {
+            return Err(E::custom("objects.sessions_differ only supports true"));
+        }
+        self.used.push("objects.sessions_differ".to_string());
+        self.criteria.push(Criterion::SessionsDiffer);
+        Ok(())
+    }
+
+    fn parse_not_contains_text<E>(&mut self) -> std::result::Result<(), E>
+    where
+        E: de::Error,
+    {
+        let Some(value) = self.root.get("not_contains_text") else {
+            return Ok(());
+        };
+        self.used.push("not_contains_text".to_string());
+        let values = if value.is_array() {
+            expect_string_array::<E>(value, "not_contains_text")?
+        } else {
+            vec![expect_string::<E>(value, "not_contains_text")?]
+        };
+        self.criteria.push(Criterion::NotContainsText(values));
+        Ok(())
+    }
+
     fn parse_dotted_objects_length_gte<E>(&mut self) -> std::result::Result<(), E>
     where
         E: de::Error,
@@ -221,7 +322,7 @@ impl<'a> MatchParser<'a> {
         let unknown = collect_unknown_keys(self.root, &self.used);
         if !unknown.is_empty() {
             return Err(E::custom(format!(
-                "unsupported match key(s): {}; supported keys are type, severity_in, confidence_band_in, objects.paths_include, objects.ips_include, objects.ports_include, objects.<field>.length_gte, evidence.has_kind, fallback.mode_in, fallback.visibility_in",
+                "unsupported match key(s): {}; supported keys are type, severity_in, confidence_band_in, objects.paths_include, objects.ips_include, objects.ports_include, objects.<field>.length_gte, evidence.has_kind, fallback.mode_in, fallback.visibility_in, not_contains_text",
                 unknown.join(", ")
             )));
         }
@@ -295,6 +396,15 @@ where
         .as_u64()
         .ok_or_else(|| E::custom(format!("{label} must be a non-negative integer")))?;
     usize::try_from(number).map_err(|_| E::custom(format!("{label} is too large")))
+}
+
+fn expect_f64<E>(value: &Value, label: &str) -> std::result::Result<f64, E>
+where
+    E: de::Error,
+{
+    value
+        .as_f64()
+        .ok_or_else(|| E::custom(format!("{label} must be a number")))
 }
 
 fn collect_unknown_keys(root: &Map<String, Value>, used: &[String]) -> Vec<String> {

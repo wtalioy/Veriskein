@@ -371,9 +371,11 @@ fn deadloop_finding(
                 .map(|entry| entry.event_id.clone())
                 .collect(),
             argv: event.process.argv.clone(),
+            ..FindingObjects::default()
         },
         evidence,
         health: FindingHealth::full(),
         component_scores: scores,
+        explanation: None,
     }
 }

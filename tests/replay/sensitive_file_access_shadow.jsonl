@@ -1,0 +1,2 @@
+{"kind":"exec","pid":720100,"ppid":1,"filename":"/usr/bin/claude","comm":"claude","argv":["claude"]}
+{"kind":"open","pid":720100,"path":"/etc/shadow","ret_fd":3,"comm":"claude"}

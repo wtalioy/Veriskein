@@ -1,0 +1,1 @@
+{"match":{"type":"sensitive_file_access","severity_in":["high"],"objects.paths_include":["/etc/shadow"],"evidence.has_kind":"file_access"}}

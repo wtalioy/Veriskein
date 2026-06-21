@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use anyhow::{Context, Result};
@@ -16,6 +17,10 @@ pub struct AlertEvidence {
     pub path: Option<String>,
     pub ip: Option<String>,
     pub port: Option<u16>,
+    pub score: Option<f32>,
+    pub src: Option<String>,
+    pub dst: Option<String>,
+    pub op: Option<String>,
     pub note: Option<String>,
 }
 
@@ -24,7 +29,13 @@ pub struct AlertObjects {
     pub paths: Vec<String>,
     pub ips: Vec<String>,
     pub ports: Vec<u16>,
+    pub prompt_ids: Vec<String>,
+    pub artifact_ids: Vec<String>,
     pub event_ids: Vec<String>,
+    pub chain_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub root_session_id: Option<String>,
+    pub downstream_session_id: Option<String>,
     pub argv: Vec<String>,
 }
 
@@ -40,12 +51,14 @@ pub struct AlertFallback {
 pub struct AlertCapture {
     pub mode: &'static str,
     pub lag_ms: Option<u64>,
+    pub redaction: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertPolicy {
     pub detector_version: u32,
     pub policy_version: u32,
+    pub component_scores: BTreeMap<String, f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,23 +82,26 @@ pub struct AlertRecord {
     pub fallback: AlertFallback,
     pub policy: AlertPolicy,
     pub capture: AlertCapture,
+    pub explanation: Option<String>,
 }
 
 impl AlertRecord {
     pub fn from_finding(finding: &Finding) -> Self {
-        let (severity, confidence_band, confidence_score) = policy_for(finding.finding_type);
+        let (severity, confidence_band, confidence_score) = policy_for(finding);
         let visibility = finding.health.visibility_state.as_str();
         let alert_type = finding.finding_type.as_str().to_string();
-        // Alert ids intentionally derive from the finding shape instead of the
-        // raw event id so duplicate detector outputs can collapse downstream.
+        // Alert ids intentionally derive from the primary object instead of
+        // the raw event id so duplicate detector outputs can collapse without
+        // making distinct CAPI chains collide.
+        let primary_object = finding
+            .objects
+            .chain_id
+            .as_deref()
+            .or_else(|| finding.objects.paths.first().map(String::as_str))
+            .or_else(|| finding.objects.event_ids.first().map(String::as_str))
+            .unwrap_or("");
         let alert_id = veriskein_proto::EventId::from_seed(
-            format!(
-                "{}:{}:{}",
-                finding.session_id,
-                alert_type,
-                finding.objects.paths.join("|")
-            )
-            .as_bytes(),
+            format!("{}:{}:{}", finding.session_id, alert_type, primary_object).as_bytes(),
         )
         .hex();
         Self {
@@ -113,11 +129,18 @@ impl AlertRecord {
             policy: AlertPolicy {
                 detector_version: 1,
                 policy_version: 1,
+                component_scores: finding
+                    .component_scores
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), *value))
+                    .collect(),
             },
             capture: AlertCapture {
                 mode: capture_mode(finding.health.prompt_evidence_state),
                 lag_ms: finding.health.capture_lag_ms,
+                redaction: redaction_mode(finding),
             },
+            explanation: finding.explanation.clone(),
         }
     }
 
@@ -148,7 +171,13 @@ impl From<&FindingObjects> for AlertObjects {
             paths: objects.paths.clone(),
             ips: objects.ips.clone(),
             ports: objects.ports.clone(),
+            prompt_ids: objects.prompt_ids.clone(),
+            artifact_ids: objects.artifact_ids.clone(),
             event_ids: objects.event_ids.clone(),
+            chain_id: objects.chain_id.clone(),
+            workspace_id: objects.workspace_id.clone(),
+            root_session_id: objects.root_session_id.clone(),
+            downstream_session_id: objects.downstream_session_id.clone(),
             argv: objects.argv.clone(),
         }
     }
@@ -163,21 +192,141 @@ impl From<&FindingEvidence> for AlertEvidence {
             path: evidence.path.clone(),
             ip: evidence.ip.clone(),
             port: evidence.port,
+            score: evidence.score,
+            src: evidence.src.clone(),
+            dst: evidence.dst.clone(),
+            op: evidence.op.clone(),
             note: evidence.note.clone(),
         }
     }
 }
 
-fn policy_for(finding_type: FindingType) -> (&'static str, &'static str, f32) {
+fn policy_for(finding: &Finding) -> (&'static str, &'static str, f32) {
     // The current detector set uses fixed policy metadata so schema consumers
     // can rely on stable severity bands before richer scoring lands.
-    match finding_type {
+    let policy = match finding.finding_type {
         FindingType::UnexpectedShell => ("high", "medium", 0.62),
         FindingType::SensitiveFileAccess => ("high", "medium", 0.68),
         FindingType::OutOfWorkspaceDeletion => ("high", "medium", 0.66),
         FindingType::SingleAgentDeadloop => ("medium", "medium", 0.62),
+        FindingType::CrossAgentPromptInjection => {
+            let score = finding
+                .component_scores
+                .get("causal_score")
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            if score >= defaults::CAPI_SCORE_THRESHOLD {
+                ("critical", "strong", score)
+            } else {
+                ("high", "medium", score)
+            }
+        }
         FindingType::ExecObserved => ("low", "strong", 1.0),
+    };
+    if finding.health.visibility_state == VisibilityState::Full {
+        policy
+    } else {
+        (
+            downgrade_severity(policy.0),
+            cap_band(policy.1),
+            policy.2.min(0.70),
+        )
     }
+}
+
+fn downgrade_severity(severity: &'static str) -> &'static str {
+    match severity {
+        "critical" => "high",
+        "high" => "medium",
+        "medium" => "low",
+        _ => severity,
+    }
+}
+
+fn cap_band(band: &'static str) -> &'static str {
+    match band {
+        "strong" => "medium",
+        _ => band,
+    }
+}
+
+fn redaction_mode(finding: &Finding) -> &'static str {
+    if finding.finding_type == FindingType::CrossAgentPromptInjection {
+        "masked"
+    } else {
+        "none"
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ThrottleEntry {
+    first_alert: AlertRecord,
+    merged_event_ids: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct AlertThrottler {
+    entries: BTreeMap<String, ThrottleEntry>,
+}
+
+impl AlertThrottler {
+    pub fn project(&mut self, finding: &Finding) -> Option<AlertRecord> {
+        let mut alert = AlertRecord::from_finding(finding);
+        let key = throttle_key(&alert);
+        let window_ns = defaults::ALERT_DEDUP_SECS * 1_000_000_000;
+        let Some(entry) = self.entries.get_mut(&key) else {
+            self.entries.insert(
+                key,
+                ThrottleEntry {
+                    first_alert: alert.clone(),
+                    merged_event_ids: Vec::new(),
+                },
+            );
+            return Some(alert);
+        };
+        if alert.ts_ns.saturating_sub(entry.first_alert.ts_ns) < window_ns {
+            for event_id in &alert.objects.event_ids {
+                if entry.merged_event_ids.len() < 16
+                    && !entry
+                        .merged_event_ids
+                        .iter()
+                        .any(|existing| existing == event_id)
+                {
+                    entry.merged_event_ids.push(event_id.clone());
+                }
+            }
+            return None;
+        }
+        for event_id in entry.merged_event_ids.drain(..) {
+            if !alert
+                .objects
+                .event_ids
+                .iter()
+                .any(|existing| existing == &event_id)
+            {
+                alert.objects.event_ids.push(event_id);
+            }
+        }
+        entry.first_alert = alert.clone();
+        Some(alert)
+    }
+}
+
+fn throttle_key(alert: &AlertRecord) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        alert.session_id,
+        alert.alert_type,
+        alert.reason_code,
+        alert.fallback.mode,
+        alert
+            .objects
+            .chain_id
+            .as_deref()
+            .or_else(|| alert.objects.paths.first().map(String::as_str))
+            .unwrap_or(&alert.session_id)
+    )
 }
 
 pub fn emit_ndjson_line<W: Write + ?Sized, T: Serialize>(writer: &mut W, value: &T) -> Result<()> {

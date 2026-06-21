@@ -1842,8 +1842,10 @@ dependencies = [
 name = "veriskein-correlator"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "blake3",
  "serde",
+ "toml",
  "veriskein-proto",
 ]
 
@@ -1944,6 +1946,8 @@ dependencies = [
  "serde",
  "serde_json",
  "veriskein-alert",
+ "veriskein-content",
+ "veriskein-correlator",
  "veriskein-detectors",
  "veriskein-graph",
  "veriskein-normalizer",

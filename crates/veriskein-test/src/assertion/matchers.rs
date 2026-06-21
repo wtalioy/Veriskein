@@ -54,6 +54,25 @@ impl Criterion {
                     })
                 })
             }
+            Self::Present { path, .. } => get_owned_path(actual, path).is_some_and(|value| {
+                !value.is_null() && value.as_str().map(|text| !text.is_empty()).unwrap_or(true)
+            }),
+            Self::NumericGte { path, min, .. } => get_owned_path(actual, path)
+                .and_then(Value::as_f64)
+                .is_some_and(|actual| actual >= *min),
+            Self::NotContainsText(forbidden) => serde_json::to_string(actual).is_ok_and(|text| {
+                forbidden
+                    .iter()
+                    .all(|needle| !needle.is_empty() && !text.contains(needle))
+            }),
+            Self::SessionsDiffer => {
+                let root =
+                    get_path(actual, &["objects", "root_session_id"]).and_then(Value::as_str);
+                let downstream =
+                    get_path(actual, &["objects", "downstream_session_id"]).and_then(Value::as_str);
+                root.zip(downstream)
+                    .is_some_and(|(root, downstream)| root != downstream)
+            }
         }
     }
 }

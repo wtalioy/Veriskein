@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use veriskein_alert::{AlertRecord, emit_ndjson_line, validate};
+use veriskein_alert::{AlertThrottler, emit_ndjson_line, validate};
 use veriskein_bpf::CaptureControl;
 use veriskein_capture::{
     AttachSink, CaptureReconciler, CaptureStatus, ProcMapsProvider, RuntimeAttachSink,
@@ -13,8 +13,14 @@ use veriskein_collector::CollectorCore;
 use veriskein_content::{
     ContentFragment, ContentRuntime, ExtractedPrompt, StreamOwner, StreamProvenance, TlsStreamKey,
 };
-use veriskein_correlator::{PromptEvidence, PromptEvidenceKind, PromptInput, PromptStore};
-use veriskein_detectors::{DetectorEngine, Finding, FindingEvidence, FindingType, VisibilityState};
+use veriskein_correlator::{
+    CapiState, ChainRiskKind, FileEventInput, InjectionKeywordConfig, PromptEvidence,
+    PromptEvidenceKind, PromptInput, PromptStore,
+};
+use veriskein_detectors::{
+    DetectorEngine, Finding, FindingEvidence, FindingType, VisibilityState,
+    detect_cross_agent_prompt_injection,
+};
 use veriskein_graph::{AgentConfig, GraphState, LlmEndpointResolver};
 use veriskein_normalizer::{
     NormalizedData, NormalizedEvent, Normalizer, SensitiveConfig, load_workspaces,
@@ -45,6 +51,8 @@ pub(crate) struct RuntimePipeline {
     seen_capture_candidates: usize,
     content: ContentRuntime,
     prompts: PromptStore,
+    capi: CapiState,
+    alert_throttler: AlertThrottler,
 }
 
 impl RuntimePipeline {
@@ -55,6 +63,8 @@ impl RuntimePipeline {
     ) -> Result<Self> {
         let sensitive = SensitiveConfig::load(&config_root.join("config/sensitive.toml"))?;
         let agent_config = AgentConfig::load(&config_root.join("config/agents.toml"))?;
+        let injection_keywords =
+            InjectionKeywordConfig::load(&config_root.join("config/injection_keywords.toml"))?;
         let workspace_inputs = agent_config.workspace_inputs_with_default(workspace_inputs);
         let workspaces = load_workspaces(&workspace_inputs)?;
         let normalizer = Normalizer::new(sensitive, workspaces);
@@ -79,6 +89,8 @@ impl RuntimePipeline {
             seen_capture_candidates,
             content: ContentRuntime::new(),
             prompts: PromptStore::default(),
+            capi: CapiState::new(injection_keywords),
+            alert_throttler: AlertThrottler::default(),
         })
     }
 
@@ -118,7 +130,10 @@ impl RuntimePipeline {
         for prompt in handle_content_fragment(evt, &self.graph, &self.state_net, &mut self.content)
         {
             if let Some(input) = prompt_input_from_extraction(evt, prompt) {
-                self.prompts.insert(input);
+                let prompt_id = self.prompts.insert(input);
+                if let Some(snapshot) = self.prompts.snapshot(prompt_id) {
+                    self.capi.observe_prompt(snapshot);
+                }
             }
         }
     }
@@ -149,9 +164,10 @@ impl RuntimePipeline {
                     self.capture_statuses.get(&normalized.process.pid),
                 );
             }
-            emitted += findings.len();
+            self.observe_capi_file_event(&normalized);
+            findings.extend(self.capi_findings_for_event(&normalized, &findings));
             for finding in findings {
-                emit_finding(sink, &finding)?;
+                emitted += usize::from(emit_finding(&mut self.alert_throttler, sink, &finding)?);
             }
         }
         Ok(emitted)
@@ -185,6 +201,90 @@ impl RuntimePipeline {
             self.capture_statuses.insert(status.pid, status);
         }
     }
+
+    fn observe_capi_file_event(&mut self, normalized: &NormalizedEvent) {
+        let Some(binding) = self.graph.resolve(normalized.process.pid) else {
+            return;
+        };
+        let NormalizedData::FileOpen {
+            path,
+            ret_fd,
+            flags,
+        } = &normalized.data
+        else {
+            return;
+        };
+        if *ret_fd < 0 {
+            return;
+        }
+        let (is_read, is_write) = file_access_modes(*flags);
+        if !is_write && !is_read {
+            return;
+        }
+        let file_input = FileEventInput {
+            session_id: binding.session_id,
+            agent_id: Some(binding.agent_id),
+            pid: normalized.process.pid,
+            path: path.preferred_path_string(),
+            ts_ns: normalized.ts_ns,
+            is_workspace: path
+                .workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.id == binding.workspace.id),
+            is_write,
+            is_read,
+            inline_excerpt: None,
+        };
+        self.capi
+            .observe_file_event(file_input, read_artifact_excerpt);
+    }
+
+    fn capi_findings_for_event(
+        &mut self,
+        normalized: &NormalizedEvent,
+        base_findings: &[Finding],
+    ) -> Vec<Finding> {
+        let Some(binding) = self.graph.resolve(normalized.process.pid) else {
+            return Vec::new();
+        };
+        let prompts = &self.prompts;
+        base_findings
+            .iter()
+            .filter_map(|finding| ChainRiskKind::from_alert_type(finding.finding_type.as_str()))
+            .flat_map(|risk_kind| {
+                self.capi.chains_for_risky_event(
+                    binding.session_id,
+                    normalized.event_id.clone(),
+                    normalized.ts_ns,
+                    risk_kind,
+                    |prompt_id| prompts.snapshot(prompt_id),
+                )
+            })
+            .filter_map(|chain| {
+                detect_cross_agent_prompt_injection(
+                    &chain,
+                    normalized.process.pid,
+                    normalized.process.tid,
+                )
+            })
+            .collect()
+    }
+}
+
+const O_WRONLY: u32 = 1;
+const O_RDWR: u32 = 2;
+const O_ACCMODE: u32 = 3;
+const O_CREAT: u32 = 64;
+const O_TRUNC: u32 = 512;
+const O_APPEND: u32 = 1024;
+
+fn file_access_modes(flags: u32) -> (bool, bool) {
+    let access_mode = flags & O_ACCMODE;
+    let is_read = access_mode == 0 || access_mode == O_RDWR;
+    let is_write = access_mode == O_WRONLY
+        || access_mode == O_RDWR
+        || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
+    (is_read, is_write)
 }
 
 fn attach_sink(capture_control: Option<CaptureControl>) -> Box<dyn AttachSink + Send> {
@@ -311,9 +411,26 @@ fn capture_health_note(status: &CaptureStatus) -> Option<String> {
     }
 }
 
-fn emit_finding(sink: &mut dyn Write, finding: &Finding) -> Result<()> {
-    let alert = AlertRecord::from_finding(finding);
+fn read_artifact_excerpt(path: &str) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(
+        bytes
+            .into_iter()
+            .take(veriskein_proto::defaults::TEXT_EXCERPT_MAX)
+            .collect(),
+    )
+}
+
+fn emit_finding(
+    throttler: &mut AlertThrottler,
+    sink: &mut dyn Write,
+    finding: &Finding,
+) -> Result<bool> {
+    let Some(alert) = throttler.project(finding) else {
+        return Ok(false);
+    };
     let value = alert.as_value()?;
     validate(&value).context("validate alert against schema")?;
-    emit_ndjson_line(sink, &value)
+    emit_ndjson_line(sink, &value)?;
+    Ok(true)
 }

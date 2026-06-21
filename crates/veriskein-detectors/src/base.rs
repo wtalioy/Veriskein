@@ -176,10 +176,9 @@ fn path_finding(
         workspace: binding.workspace.root.display().to_string(),
         objects: FindingObjects {
             paths: vec![input.path.clone()],
-            ips: Vec::new(),
-            ports: Vec::new(),
             event_ids: vec![event.event_id.clone()],
             argv: input.argv,
+            ..FindingObjects::default()
         },
         evidence: vec![FindingEvidence::path_event(
             input.evidence_kind,
@@ -189,5 +188,6 @@ fn path_finding(
         )],
         health: FindingHealth::full(),
         component_scores: BTreeMap::new(),
+        explanation: None,
     }
 }

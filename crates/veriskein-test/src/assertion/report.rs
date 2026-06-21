@@ -29,6 +29,13 @@ impl fmt::Display for Criterion {
             Self::EvidenceHasKinds(kinds) => {
                 write!(formatter, "evidence.has_kind includes {:?}", kinds)
             }
+            Self::Present { label, .. } => write!(formatter, "{label} present"),
+            Self::NumericGte { label, min, .. } => write!(formatter, "{label} >= {min}"),
+            Self::NotContainsText(values) => write!(formatter, "not_contains_text {:?}", values),
+            Self::SessionsDiffer => write!(
+                formatter,
+                "objects.root_session_id != objects.downstream_session_id"
+            ),
         }
     }
 }

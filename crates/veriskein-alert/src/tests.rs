@@ -4,7 +4,7 @@ use veriskein_detectors::{
     VisibilityState,
 };
 
-use crate::{AlertRecord, sample_alert_value, validate};
+use crate::{AlertRecord, AlertThrottler, sample_alert_value, validate};
 
 fn finding(finding_type: FindingType) -> Finding {
     Finding {
@@ -21,10 +21,9 @@ fn finding(finding_type: FindingType) -> Finding {
         workspace: "/tmp/ws".to_string(),
         objects: FindingObjects {
             paths: vec!["/etc/shadow".to_string()],
-            ips: Vec::new(),
-            ports: Vec::new(),
             event_ids: vec!["deadbeef".to_string()],
             argv: vec!["claude".to_string()],
+            ..FindingObjects::default()
         },
         evidence: vec![FindingEvidence {
             kind: "file_access",
@@ -33,10 +32,15 @@ fn finding(finding_type: FindingType) -> Finding {
             path: Some("/etc/shadow".to_string()),
             ip: None,
             port: None,
+            score: None,
+            src: None,
+            dst: None,
+            op: None,
             note: None,
         }],
         health: FindingHealth::full(),
         component_scores: Default::default(),
+        explanation: None,
     }
 }
 
@@ -92,6 +96,7 @@ fn deadloop_projection_is_schema_valid() {
             ports: vec![443],
             event_ids: vec!["net-1".to_string(), "file-1".to_string()],
             argv: vec!["claude".to_string()],
+            ..FindingObjects::default()
         },
         evidence: vec![
             FindingEvidence {
@@ -101,6 +106,10 @@ fn deadloop_projection_is_schema_valid() {
                 path: None,
                 ip: Some("127.0.0.1".to_string()),
                 port: Some(443),
+                score: None,
+                src: None,
+                dst: None,
+                op: None,
                 note: None,
             },
             FindingEvidence {
@@ -110,6 +119,10 @@ fn deadloop_projection_is_schema_valid() {
                 path: Some("/tmp/loopfile".to_string()),
                 ip: None,
                 port: None,
+                score: None,
+                src: None,
+                dst: None,
+                op: None,
                 note: None,
             },
         ],
@@ -175,4 +188,67 @@ fn prompt_health_projects_capture_metadata() {
     assert_eq!(value["capture"]["mode"], "tls");
     assert_eq!(value["capture"]["lag_ms"], 750);
     validate(&value).expect("schema valid");
+}
+
+#[test]
+fn capi_projection_is_schema_valid_and_strong() {
+    let mut finding = finding(FindingType::CrossAgentPromptInjection);
+    finding.reason_code = "capi_cross_session_prompt_to_syscall";
+    finding.summary = "cross-session prompt injection".to_string();
+    finding.objects = FindingObjects {
+        prompt_ids: vec!["00112233445566778899aabbccddeeff".to_string()],
+        artifact_ids: vec!["11112233445566778899aabbccddeeff".to_string()],
+        event_ids: vec!["evt-risk".to_string()],
+        chain_id: Some("22222233445566778899aabbccddeeff".to_string()),
+        root_session_id: Some("33333333445566778899aabbccddeeff".to_string()),
+        downstream_session_id: Some("00112233445566778899aabbccddeeff".to_string()),
+        ..FindingObjects::default()
+    };
+    finding.evidence = vec![FindingEvidence {
+        kind: "excerpt_match",
+        event_id: "22222233445566778899aabbccddeeff".to_string(),
+        ingest_seq: 0,
+        path: None,
+        ip: None,
+        port: None,
+        score: Some(0.40),
+        src: Some("upstream".to_string()),
+        dst: Some("downstream".to_string()),
+        op: None,
+        note: Some("exact".to_string()),
+    }];
+    finding.component_scores.insert("causal_score", 0.90);
+    finding.health.prompt_evidence_state = PromptEvidenceState::Available;
+    finding.explanation = Some("upstream excerpt -> downstream prompt -> risky action".to_string());
+
+    let value = AlertRecord::from_finding(&finding)
+        .as_value()
+        .expect("value");
+
+    assert_eq!(value["type"], "cross_agent_prompt_injection");
+    assert_eq!(value["severity"], "critical");
+    assert_eq!(value["confidence_band"], "strong");
+    assert_eq!(value["capture"]["redaction"], "masked");
+    validate(&value).expect("schema valid");
+}
+
+#[test]
+fn throttler_suppresses_and_merges_inside_window() {
+    let mut throttler = AlertThrottler::default();
+    let mut first = finding(FindingType::SensitiveFileAccess);
+    first.ts_ns = 1_000;
+    first.objects.event_ids = vec!["evt-1".to_string()];
+    let mut second = first.clone();
+    second.ts_ns = first.ts_ns + 10_000_000_000;
+    second.objects.event_ids = vec!["evt-2".to_string()];
+    let mut third = first.clone();
+    third.ts_ns = first.ts_ns + 61_000_000_000;
+    third.objects.event_ids = vec!["evt-3".to_string()];
+
+    assert!(throttler.project(&first).is_some());
+    assert!(throttler.project(&second).is_none());
+    let emitted = throttler.project(&third).expect("outside window emits");
+
+    assert!(emitted.objects.event_ids.contains(&"evt-2".to_string()));
+    assert!(emitted.objects.event_ids.contains(&"evt-3".to_string()));
 }

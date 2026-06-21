@@ -1,0 +1,1 @@
+{"match":{"type":"single_agent_deadloop","severity_in":["medium"],"confidence_band_in":["medium"],"objects.ips_include":["127.0.0.1"],"objects.paths_include":["*loopfile"],"evidence.has_kind":["net_connect","file_access"]}}
