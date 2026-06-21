@@ -1,1 +1,1 @@
-{"match":{"type":"out_of_workspace_deletion"}}
+{"match":{"type":"out_of_workspace_deletion","severity_in":["high"],"objects.paths_include":["outside/file.txt"],"evidence.has_kind":"syscall"}}

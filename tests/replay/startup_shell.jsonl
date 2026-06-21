@@ -1,0 +1,3 @@
+{"kind":"startup","pid":700200,"ppid":1,"filename":"/usr/bin/claude","comm":"claude","argv":["claude"]}
+{"kind":"fork","pid":700200,"child_pid":700201,"comm":"claude"}
+{"kind":"exec","pid":700201,"ppid":700200,"filename":"/bin/sh","comm":"sh","argv":["sh","-lc","true"]}

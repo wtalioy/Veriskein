@@ -1,0 +1,4 @@
+# Scenario D exercises Phase 2 resource-abuse detection without prompt capture.
+id = "D"
+timeout = "30s"
+workspace = "/tmp/ws"

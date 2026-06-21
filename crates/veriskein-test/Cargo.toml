@@ -14,6 +14,12 @@ anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+veriskein-alert = { path = "../veriskein-alert" }
+veriskein-detectors = { path = "../veriskein-detectors" }
+veriskein-graph = { path = "../veriskein-graph" }
+veriskein-normalizer = { path = "../veriskein-normalizer" }
+veriskein-proto = { path = "../veriskein-proto" }
+veriskein-state-net = { path = "../veriskein-state-net" }
 
 [[bin]]
 name = "veriskein-test"

@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use serde_json::Value;
+
+mod assert_cmd;
+mod replay;
 
 #[derive(Debug, Parser)]
 #[command(name = "veriskein-test")]
@@ -18,27 +20,35 @@ enum Command {
         expect: PathBuf,
         #[arg(long)]
         actual: PathBuf,
+        #[arg(long)]
+        timeout: Option<String>,
+    },
+    Replay {
+        #[arg(long)]
+        fixture: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long = "config-root", default_value = ".")]
+        config_root: PathBuf,
+        #[arg(long = "workspace")]
+        workspaces: Vec<PathBuf>,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Assert { expect, actual } => {
-            // NDJSON keeps the scenario fixtures diffable and append-friendly,
-            // so the CLI reads one JSON object per non-empty line.
-            let expectations: Vec<veriskein_test::Expectation> = std::fs::read_to_string(expect)?
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(serde_json::from_str)
-                .collect::<std::result::Result<_, _>>()?;
-            let actual_values: Vec<Value> = std::fs::read_to_string(actual)?
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(serde_json::from_str)
-                .collect::<std::result::Result<_, _>>()?;
-            veriskein_test::assert_expectations(&expectations, &actual_values)?;
-        }
+        Command::Assert {
+            expect,
+            actual,
+            timeout,
+        } => assert_cmd::assert_files(&expect, &actual, timeout.as_deref())?,
+        Command::Replay {
+            fixture,
+            output,
+            config_root,
+            workspaces,
+        } => replay::replay_fixture(&fixture, &output, &config_root, &workspaces)?,
     }
     Ok(())
 }

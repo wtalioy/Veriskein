@@ -43,8 +43,15 @@ fi
 mkdir -p "${ARTIFACT_DIR}"
 
 ensure_binaries() {
+  # Rebuilding `veriskein-daemon` can strip file capabilities needed for live
+  # BPF preflight, so preserve existing runnable binaries unless a rebuild is
+  # explicitly requested or an artifact is missing.
   if [[ "${VERISKEIN_FORCE_BUILD:-0}" = "1" || ! -x "${DAEMON_BIN}" || ! -x "${TEST_BIN}" ]]; then
     "${CARGO_BIN}" build -p veriskein-daemon -p veriskein-test --manifest-path "${ROOT_DIR}/Cargo.toml" >/dev/null
+  fi
+  if [[ ! -x "${DAEMON_BIN}" || ! -x "${TEST_BIN}" ]]; then
+    echo "required binaries were not produced under ${ROOT_DIR}/target/debug" >&2
+    exit 1
   fi
 }
 
@@ -77,7 +84,14 @@ run_scenario() {
     "${scenario_dir}/setup.sh"
   fi
 
-  ensure_binaries
+  cleanup_daemon() {
+    if [[ -n "${daemon_pid}" ]] && kill -0 "${daemon_pid}" 2>/dev/null; then
+      kill -TERM "${daemon_pid}" 2>/dev/null || true
+      wait "${daemon_pid}" 2>/dev/null || true
+    fi
+    daemon_pid=""
+  }
+  trap cleanup_daemon RETURN
 
   VERISKEIN_CONFIG_ROOT="${config_root}" "${DAEMON_BIN}" \
     --workspace "${workspace}" \
@@ -90,6 +104,7 @@ run_scenario() {
     echo "daemon exited before scenario ${slug}" >&2
     sed -n '1,120p' "${daemon_log}" >&2 || true
     wait "${daemon_pid}" || true
+    daemon_pid=""
     return 1
   fi
 
@@ -99,14 +114,23 @@ run_scenario() {
   # Ask the daemon to flush and stop cleanly so alert assertions see the final
   # NDJSON output instead of racing a forced exit.
   kill -TERM "${daemon_pid}"
-  wait "${daemon_pid}"
+  if ! wait "${daemon_pid}"; then
+    echo "daemon exited non-zero after scenario ${slug}" >&2
+    sed -n '1,120p' "${daemon_log}" >&2 || true
+    daemon_pid=""
+    return 1
+  fi
+  daemon_pid=""
 
   "${TEST_BIN}" assert \
     --expect "${scenario_dir}/expect.jsonl" \
     --actual "${alerts}"
 
+  trap - RETURN
   echo "PASS ${slug} (${run_dir})"
 }
+
+ensure_binaries
 
 mapfile -t scenarios < <(find "${SCENARIO_ROOT}" -mindepth 1 -maxdepth 1 -type d | sort)
 for scenario_dir in "${scenarios[@]}"; do

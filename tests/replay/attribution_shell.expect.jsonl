@@ -1,0 +1,1 @@
+{"match":{"type":"unexpected_shell","objects.paths_include":["/bin/sh"],"evidence.has_kind":"syscall"}}

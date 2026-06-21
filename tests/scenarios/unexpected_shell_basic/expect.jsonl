@@ -1,1 +1,1 @@
-{"match":{"type":"unexpected_shell"}}
+{"match":{"type":"unexpected_shell","severity_in":["high"],"confidence_band_in":["medium"],"objects.paths_include":["/bin/sh"],"evidence.has_kind":"syscall"}}
