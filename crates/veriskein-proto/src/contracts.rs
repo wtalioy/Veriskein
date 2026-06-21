@@ -17,8 +17,12 @@ pub const REGISTRY_OWNERS: &[RegistryOwner] = &[
         writer: "veriskein-state-net",
     },
     RegistryOwner {
-        registry: "capture attachment/content fd whitelist",
-        writer: "veriskein-capture",
+        registry: "tls capture attachment",
+        writer: "veriskein-bpf",
+    },
+    RegistryOwner {
+        registry: "tls content attribution",
+        writer: "veriskein-content",
     },
     RegistryOwner {
         registry: "prompt/artifact/evidence chain",
@@ -51,14 +55,6 @@ pub const RECONCILERS: &[ReconcilerContract] = &[
         cache_ttl_s: crate::defaults::AGENT_PROMOTION_WINDOW_S,
         produced_facts: &["EnvEvidence"],
         stale_behavior: "treat env evidence as absent",
-    },
-    ReconcilerContract {
-        name: "tls_maps_scan",
-        owner: "veriskein-capture",
-        max_cadence_s: crate::defaults::TLS_ATTACH_RESCAN_S,
-        cache_ttl_s: crate::defaults::CANDIDATE_CAPTURE_TTL_S,
-        produced_facts: &["CaptureStatus"],
-        stale_behavior: "mark capture visibility unavailable",
     },
     ReconcilerContract {
         name: "path_canonicalization",

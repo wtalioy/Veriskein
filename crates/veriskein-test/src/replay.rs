@@ -4,24 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use veriskein_alert::{AlertThrottler, emit_ndjson_line, validate};
-use veriskein_content::{
-    ContentFragment, ContentRuntime, StreamOwner, StreamProvenance, TlsStreamKey,
-};
-use veriskein_correlator::{
-    CapiState, ChainRiskKind, FileEventInput, InjectionKeywordConfig, PromptInput, PromptStore,
-};
-use veriskein_detectors::DetectorEngine;
-use veriskein_detectors::detect_cross_agent_prompt_injection;
-use veriskein_graph::{AgentConfig, EnvEvidence, GraphState, LlmEndpointResolver};
-use veriskein_normalizer::{
-    NormalizedData, NormalizedEvent, Normalizer, ProcessSnapshot, SensitiveConfig, load_workspaces,
-    path_basename,
-};
-use veriskein_proto::{
-    ContentChannel, ContentDirection, EventFixture, OwnedContentFragEvent, OwnedEvent, parse,
-};
-use veriskein_state_net::StateNet;
+use veriskein_daemon::pipeline::RuntimePipeline;
+use veriskein_graph::{AgentConfig, EnvEvidence};
+use veriskein_normalizer::{ProcessSnapshot, path_basename};
+use veriskein_proto::{ContentChannel, ContentDirection, EventFixture, OwnedEvent, parse};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -109,24 +95,12 @@ pub(crate) fn replay_fixture(
     config_root: &Path,
     workspace_inputs: &[PathBuf],
 ) -> Result<()> {
-    let sensitive = SensitiveConfig::load(&config_root.join("config/sensitive.toml"))?;
     let agent_config = AgentConfig::load(&config_root.join("config/agents.toml"))?;
     let workspace_inputs = agent_config.workspace_inputs_with_default(workspace_inputs);
     if workspace_inputs.is_empty() {
         bail!("replay requires at least one --workspace or config/agents.toml default_workspace");
     }
-    let workspaces = load_workspaces(&workspace_inputs)?;
-    let mut normalizer = Normalizer::new(sensitive, workspaces);
-    let mut state_net = StateNet::new();
-    let mut graph = GraphState::new(agent_config.clone(), normalizer.workspaces().to_vec())?;
-    graph.refresh_endpoint_ips(LlmEndpointResolver::resolve(&agent_config.llm_endpoints));
-    let mut detectors = DetectorEngine::new();
-    let mut content = ContentRuntime::new();
-    let mut prompts = PromptStore::default();
-    let mut capi = CapiState::new(InjectionKeywordConfig::load(
-        &config_root.join("config/injection_keywords.toml"),
-    )?);
-    let mut throttler = AlertThrottler::default();
+    let mut pipeline = RuntimePipeline::new(config_root, &workspace_inputs)?;
     let mut writer = BufWriter::new(
         std::fs::File::create(output)
             .with_context(|| format!("create replay output {}", output.display()))?,
@@ -144,47 +118,18 @@ pub(crate) fn replay_fixture(
             .with_context(|| format!("parse replay fixture line {}", idx + 1))?;
         replay.materialize_open_content(&workspace_inputs)?;
         if let Some((snapshot, env_evidence)) = replay.to_startup_seed(&workspace_inputs) {
-            graph.seed_from_snapshot(&snapshot, env_evidence);
+            pipeline.seed_startup_snapshot(&snapshot, env_evidence);
             continue;
         }
         let event = replay
             .to_owned_event(seq)
             .with_context(|| format!("build replay fixture line {}", idx + 1))?;
         if let Some((pid, env_evidence)) = replay.env_evidence_for_exec() {
-            graph.apply_env_evidence(pid, env_evidence, seq);
+            pipeline.apply_env_evidence(pid, env_evidence, seq);
         }
-        if let OwnedEvent::ContentFrag(evt) = &event {
-            process_content_fragment(
-                evt,
-                &graph,
-                &mut state_net,
-                &mut content,
-                &mut prompts,
-                &mut capi,
-            );
-            continue;
-        }
-        for normalized in normalizer.apply(seq, &event) {
-            state_net.apply(&normalized);
-            graph.apply(&normalized);
-            observe_capi_file_event(&normalized, &graph, &mut capi);
-            let mut findings = detectors.detect(&normalized, &graph, false);
-            findings.extend(capi_findings_for_event(
-                &normalized,
-                &graph,
-                &mut capi,
-                &prompts,
-                &findings,
-            ));
-            for finding in findings {
-                let Some(alert) = throttler.project(&finding) else {
-                    continue;
-                };
-                let value = alert.as_value()?;
-                validate(&value).context("validate replay alert")?;
-                emit_ndjson_line(&mut writer, &value)?;
-            }
-        }
+        pipeline
+            .process_replay_event(seq, &event, &mut writer, false)
+            .with_context(|| format!("process replay fixture line {}", idx + 1))?;
     }
     writer.flush().context("flush replay output")?;
     Ok(())
@@ -337,120 +282,6 @@ impl ReplayEvent {
     }
 }
 
-fn process_content_fragment(
-    evt: &OwnedContentFragEvent,
-    graph: &GraphState,
-    state_net: &mut StateNet,
-    content: &mut ContentRuntime,
-    prompts: &mut PromptStore,
-    capi: &mut CapiState,
-) {
-    let binding = graph.resolve(evt.header.pid);
-    let owner = StreamOwner::new(
-        binding.map(|binding| binding.session_id),
-        binding.map(|binding| binding.agent_id),
-    );
-    state_net.record_tls_fragment(evt.header.pid, evt.ssl_ctx, evt.header.ts_ns);
-    let fragment = ContentFragment::with_degradation(
-        TlsStreamKey::new(evt.header.pid, evt.ssl_ctx, evt.direction).stream_id(),
-        evt.stream_offset,
-        evt.data.clone(),
-        owner,
-        StreamProvenance {
-            channel: evt.channel,
-            direction: evt.direction,
-            source: Some(format!("ssl_ctx={:x}", evt.ssl_ctx)),
-        },
-        Vec::new(),
-    );
-    for prompt in content.append(fragment) {
-        let Some(session_id) = prompt.owner.session_id else {
-            continue;
-        };
-        let prompt_id = prompts.insert(PromptInput {
-            session_id,
-            agent_id: prompt.owner.agent_id,
-            stream_id: prompt.stream_id,
-            capture_mode: prompt.provenance.channel,
-            ts_start: evt.header.ts_ns,
-            ts_end: evt.header.ts_ns,
-            excerpt: prompt.text.into_bytes(),
-            visibility_state: prompt.visibility,
-            degraded: !prompt.degradation_reasons.is_empty(),
-        });
-        if let Some(snapshot) = prompts.snapshot(prompt_id) {
-            capi.observe_prompt(snapshot);
-        }
-    }
-}
-
-fn observe_capi_file_event(normalized: &NormalizedEvent, graph: &GraphState, capi: &mut CapiState) {
-    let Some(binding) = graph.resolve(normalized.process.pid) else {
-        return;
-    };
-    let NormalizedData::FileOpen {
-        path,
-        ret_fd,
-        flags,
-    } = &normalized.data
-    else {
-        return;
-    };
-    if *ret_fd < 0 {
-        return;
-    }
-    let (is_read, is_write) = file_access_modes(*flags);
-    capi.observe_file_event(
-        FileEventInput {
-            session_id: binding.session_id,
-            agent_id: Some(binding.agent_id),
-            pid: normalized.process.pid,
-            path: path.preferred_path_string(),
-            ts_ns: normalized.ts_ns,
-            is_workspace: path
-                .workspace
-                .as_ref()
-                .is_some_and(|workspace| workspace.id == binding.workspace.id),
-            is_write,
-            is_read,
-            inline_excerpt: None,
-        },
-        |path| std::fs::read(path).ok(),
-    );
-}
-
-fn capi_findings_for_event(
-    normalized: &NormalizedEvent,
-    graph: &GraphState,
-    capi: &mut CapiState,
-    prompts: &PromptStore,
-    base_findings: &[veriskein_detectors::Finding],
-) -> Vec<veriskein_detectors::Finding> {
-    let Some(binding) = graph.resolve(normalized.process.pid) else {
-        return Vec::new();
-    };
-    base_findings
-        .iter()
-        .filter_map(|finding| ChainRiskKind::from_alert_type(finding.finding_type.as_str()))
-        .flat_map(|risk_kind| {
-            capi.chains_for_risky_event(
-                binding.session_id,
-                normalized.event_id.clone(),
-                normalized.ts_ns,
-                risk_kind,
-                |prompt_id| prompts.snapshot(prompt_id),
-            )
-        })
-        .filter_map(|chain| {
-            detect_cross_agent_prompt_injection(
-                &chain,
-                normalized.process.pid,
-                normalized.process.tid,
-            )
-        })
-        .collect()
-}
-
 fn apply_connect_ip(event: &mut OwnedEvent, ip: &str) -> Result<()> {
     let OwnedEvent::NetConnect(connect) = event else {
         bail!("connect replay event did not build a net_connect event");
@@ -505,20 +336,4 @@ fn parse_direction(direction: &str) -> Result<ContentDirection> {
         "write" | "out" => Ok(ContentDirection::Write),
         other => bail!("unsupported content direction {other:?}"),
     }
-}
-
-const O_WRONLY: u32 = 1;
-const O_RDWR: u32 = 2;
-const O_ACCMODE: u32 = 3;
-const O_CREAT: u32 = 64;
-const O_TRUNC: u32 = 512;
-const O_APPEND: u32 = 1024;
-
-fn file_access_modes(flags: u32) -> (bool, bool) {
-    let access_mode = flags & O_ACCMODE;
-    let is_read = access_mode == 0 || access_mode == O_RDWR;
-    let is_write = access_mode == O_WRONLY
-        || access_mode == O_RDWR
-        || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
-    (is_read, is_write)
 }

@@ -99,12 +99,18 @@ struct PendingRead {
     read_ts_ns: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CandidateEntry {
+    candidate: CrossSessionMatchCandidate,
+    prompt_ts_ns: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct CapiState {
     artifacts: ArtifactStore,
     latest_file_lineage: BTreeMap<String, FileLineage>,
     pending_downstream_reads: BTreeMap<SessionId, Vec<PendingRead>>,
-    candidates: BTreeMap<CandidateKey, CrossSessionMatchCandidate>,
+    candidates: BTreeMap<CandidateKey, CandidateEntry>,
     emitted_chains: BTreeSet<veriskein_proto::ChainId>,
     keywords: InjectionKeywordConfig,
 }
@@ -178,7 +184,8 @@ impl CapiState {
     }
 
     pub fn observe_prompt(&mut self, prompt: PromptSnapshot) {
-        let max_age_ns = veriskein_proto::defaults::CAPI_WINDOW_MS * 1_000_000;
+        self.prune(prompt.ts_start);
+        let max_age_ns = capi_window_ns();
         if let Some(pending) = self.pending_downstream_reads.get_mut(&prompt.session_id) {
             pending.retain(|read| {
                 prompt.ts_start >= read.read_ts_ns
@@ -203,7 +210,10 @@ impl CapiState {
                     artifact_id: candidate.artifact_id,
                     prompt_id: candidate.prompt_id,
                 },
-                candidate,
+                CandidateEntry {
+                    candidate,
+                    prompt_ts_ns: prompt.ts_start,
+                },
             );
         }
     }
@@ -216,12 +226,14 @@ impl CapiState {
         risky_kind: ChainRiskKind,
         prompt_lookup: impl Fn(veriskein_proto::PromptId) -> Option<PromptSnapshot>,
     ) -> Vec<EvidenceChain> {
+        self.prune(risky_ts_ns);
         let mut out = Vec::new();
         let mut best_by_prompt =
             BTreeMap::<veriskein_proto::PromptId, CrossSessionMatchCandidate>::new();
         for candidate in self
             .candidates
             .values()
+            .map(|entry| &entry.candidate)
             .filter(|candidate| candidate.downstream_session == downstream_session)
             .cloned()
         {
@@ -262,6 +274,21 @@ impl CapiState {
     pub fn artifact(&self, artifact_id: veriskein_proto::ArtifactId) -> Option<&SourceArtifact> {
         self.artifacts.get(artifact_id)
     }
+
+    fn prune(&mut self, now_ns: u64) {
+        let max_age_ns = capi_window_ns();
+        for reads in self.pending_downstream_reads.values_mut() {
+            reads.retain(|read| read.read_ts_ns.saturating_add(max_age_ns) >= now_ns);
+        }
+        self.pending_downstream_reads
+            .retain(|_, reads| !reads.is_empty());
+        self.candidates
+            .retain(|_, entry| entry.prompt_ts_ns.saturating_add(max_age_ns) >= now_ns);
+    }
+}
+
+fn capi_window_ns() -> u64 {
+    veriskein_proto::defaults::CAPI_WINDOW_MS * 1_000_000
 }
 
 #[cfg(test)]

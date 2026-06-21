@@ -17,6 +17,7 @@ serde_json.workspace = true
 veriskein-alert = { path = "../veriskein-alert" }
 veriskein-content = { path = "../veriskein-content" }
 veriskein-correlator = { path = "../veriskein-correlator" }
+veriskein-daemon = { path = "../veriskein-daemon" }
 veriskein-detectors = { path = "../veriskein-detectors" }
 veriskein-graph = { path = "../veriskein-graph" }
 veriskein-normalizer = { path = "../veriskein-normalizer" }

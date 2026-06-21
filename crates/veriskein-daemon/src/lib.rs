@@ -5,7 +5,7 @@ mod enrich;
 mod env;
 mod metrics;
 mod output;
-mod pipeline;
+pub mod pipeline;
 mod preflight;
 
 use std::path::PathBuf;

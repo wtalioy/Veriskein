@@ -41,6 +41,7 @@ struct StreamState {
     stream_id: u64,
     owner: StreamOwner,
     provenance: StreamProvenance,
+    base_offset: u64,
     next_offset: u64,
     buf: Vec<u8>,
     pending: BTreeMap<u64, Vec<u8>>,
@@ -54,6 +55,7 @@ impl StreamState {
             stream_id: 0,
             owner,
             provenance,
+            base_offset: 0,
             next_offset: 0,
             buf: Vec::new(),
             pending: BTreeMap::new(),
@@ -111,6 +113,7 @@ impl StreamState {
                 JsonFrame::NotJson => break,
             }
         }
+        self.compact_consumed();
         out
     }
 
@@ -120,6 +123,7 @@ impl StreamState {
         }
         let remainder = self.buf[self.consumed..].to_vec();
         self.consumed = self.buf.len();
+        self.compact_consumed();
         self.prompts_from_body(&remainder)
     }
 
@@ -151,9 +155,28 @@ impl StreamState {
         )
     }
 
-    fn append_bytes(&mut self, offset: u64, bytes: Vec<u8>) {
+    fn append_bytes(&mut self, mut offset: u64, mut bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
+        }
+        let Ok(byte_len) = u64::try_from(bytes.len()) else {
+            push_unique_reason(&mut self.degraded_reasons, "fragment_offset_overflow");
+            return;
+        };
+        let Some(end_offset) = offset.checked_add(byte_len) else {
+            push_unique_reason(&mut self.degraded_reasons, "fragment_offset_overflow");
+            return;
+        };
+        if end_offset <= self.base_offset {
+            return;
+        }
+        if offset < self.base_offset {
+            let trim_len = usize::try_from(self.base_offset - offset)
+                .unwrap_or(bytes.len())
+                .min(bytes.len());
+            bytes.drain(..trim_len);
+            offset = self.base_offset;
+            push_unique_reason(&mut self.degraded_reasons, "fragment_behind_compaction");
         }
         if offset > self.next_offset {
             self.insert_pending(offset, bytes);
@@ -200,7 +223,10 @@ impl StreamState {
     }
 
     fn compare_overlap(&mut self, offset: u64, bytes: &[u8]) {
-        let Ok(start) = usize::try_from(offset) else {
+        if offset < self.base_offset {
+            return;
+        }
+        let Ok(start) = usize::try_from(offset - self.base_offset) else {
             push_unique_reason(&mut self.degraded_reasons, "fragment_offset_overflow");
             return;
         };
@@ -228,6 +254,21 @@ impl StreamState {
         };
         self.buf.extend_from_slice(bytes);
         self.next_offset = next_offset;
+    }
+
+    fn compact_consumed(&mut self) {
+        if self.consumed == 0 {
+            return;
+        }
+        if self.consumed < 4096 && self.consumed < self.buf.len() {
+            return;
+        }
+        let consumed = self.consumed;
+        self.buf.drain(..consumed);
+        self.base_offset = self
+            .base_offset
+            .saturating_add(u64::try_from(consumed).unwrap_or(u64::MAX));
+        self.consumed = 0;
     }
 }
 

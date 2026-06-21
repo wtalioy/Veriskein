@@ -36,14 +36,6 @@ pub struct RootEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CaptureCandidate {
-    pub pid: u32,
-    pub lineage_id: String,
-    pub ttl_s: u64,
-    pub evidence_strength: AttributionStrength,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribution {
     pub session_id: SessionId,
     pub agent_id: AgentId,
@@ -84,7 +76,6 @@ pub struct GraphState {
     env_evidence: BTreeMap<u32, EnvEvidence>,
     bindings: BTreeMap<u32, Attribution>,
     draining: BTreeMap<u32, DrainingBinding>,
-    capture_candidates: Vec<CaptureCandidate>,
 }
 
 impl GraphState {
@@ -105,7 +96,6 @@ impl GraphState {
             env_evidence: BTreeMap::new(),
             bindings: BTreeMap::new(),
             draining: BTreeMap::new(),
-            capture_candidates: Vec::new(),
         })
     }
 
@@ -226,10 +216,6 @@ impl GraphState {
         &self.delete_allowlist
     }
 
-    pub fn capture_candidates(&self) -> &[CaptureCandidate] {
-        &self.capture_candidates
-    }
-
     fn seed_root_candidate(
         &mut self,
         event: &NormalizedEvent,
@@ -273,12 +259,6 @@ impl GraphState {
                 event.ts_ns + defaults::AGENT_PROMOTION_WINDOW_S * 1_000_000_000,
             ),
         };
-        self.capture_candidates.push(CaptureCandidate {
-            pid: event.process.pid,
-            lineage_id,
-            ttl_s: defaults::CANDIDATE_CAPTURE_TTL_S,
-            evidence_strength: attribution.attribution_strength,
-        });
         self.confirm_if_ready(&mut attribution);
         self.bindings.insert(event.process.pid, attribution.clone());
         Some(attribution)

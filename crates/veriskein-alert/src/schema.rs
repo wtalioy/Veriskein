@@ -80,7 +80,6 @@ pub fn sample_alert_value() -> Value {
         },
         "capture": {
             "mode": "none",
-            "lag_ms": null,
             "redaction": "none"
         },
         "explanation": null

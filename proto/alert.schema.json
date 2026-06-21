@@ -101,7 +101,7 @@
         "required": ["kind", "event_id", "ingest_seq"],
         "properties": {
           "kind": {
-            "enum": ["excerpt_match", "syscall", "file_access", "net_connect", "prompt_ref", "artifact_ref", "heuristic", "capture_health"]
+            "enum": ["excerpt_match", "syscall", "file_access", "net_connect", "prompt_ref", "artifact_ref", "heuristic"]
           },
           "event_id": { "type": "string", "minLength": 1 },
           "ingest_seq": { "type": "integer", "minimum": 0 },
@@ -140,10 +140,9 @@
     "capture": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "lag_ms", "redaction"],
+      "required": ["mode", "redaction"],
       "properties": {
         "mode": { "enum": ["none", "tls"] },
-        "lag_ms": { "type": ["integer", "null"], "minimum": 0 },
         "redaction": { "enum": ["none", "masked"] }
       }
     },

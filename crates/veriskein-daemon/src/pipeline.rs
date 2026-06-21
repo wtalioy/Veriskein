@@ -4,63 +4,41 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use veriskein_alert::{AlertThrottler, emit_ndjson_line, validate};
-use veriskein_bpf::CaptureControl;
-use veriskein_capture::{
-    AttachSink, CaptureReconciler, CaptureStatus, ProcMapsProvider, RuntimeAttachSink,
-    role_allows_capture,
-};
 use veriskein_collector::CollectorCore;
 use veriskein_content::{
     ContentFragment, ContentRuntime, ExtractedPrompt, StreamOwner, StreamProvenance, TlsStreamKey,
 };
 use veriskein_correlator::{
-    CapiState, ChainRiskKind, FileEventInput, InjectionKeywordConfig, PromptEvidence,
-    PromptEvidenceKind, PromptInput, PromptStore,
+    CapiState, ChainRiskKind, FileEventInput, InjectionKeywordConfig, PromptEvidence, PromptInput,
+    PromptStore,
 };
-use veriskein_detectors::{
-    DetectorEngine, Finding, FindingEvidence, FindingType, VisibilityState,
-    detect_cross_agent_prompt_injection,
-};
-use veriskein_graph::{AgentConfig, GraphState, LlmEndpointResolver};
+use veriskein_detectors::{DetectorEngine, Finding, detect_cross_agent_prompt_injection};
+use veriskein_graph::{AgentConfig, EnvEvidence, GraphState, LlmEndpointResolver};
 use veriskein_normalizer::{
-    NormalizedData, NormalizedEvent, Normalizer, SensitiveConfig, load_workspaces,
+    NormalizedData, NormalizedEvent, Normalizer, ProcessSnapshot, SensitiveConfig, load_workspaces,
 };
-use veriskein_proto::{OwnedContentFragEvent, OwnedEvent};
+use veriskein_proto::{OwnedContentFragEvent, OwnedEvent, defaults};
 use veriskein_state_net::StateNet;
 
 use crate::enrich::enrich_event_from_procfs;
 use crate::env::env_evidence_for_pid;
 
-struct NoopAttachSink;
-
-impl AttachSink for NoopAttachSink {
-    fn attach_openssl_library(&mut self, _library_path: &Path) -> Result<usize> {
-        Ok(0)
-    }
-}
-
-pub(crate) struct RuntimePipeline {
+pub struct RuntimePipeline {
     collector: CollectorCore,
     agent_config: AgentConfig,
     normalizer: Normalizer,
     state_net: StateNet,
     graph: GraphState,
     detectors: DetectorEngine,
-    capture: CaptureReconciler<Box<dyn AttachSink + Send>, ProcMapsProvider>,
-    capture_statuses: BTreeMap<u32, CaptureStatus>,
-    seen_capture_candidates: usize,
     content: ContentRuntime,
     prompts: PromptStore,
+    pending_prompts: BTreeMap<u32, Vec<PendingPrompt>>,
     capi: CapiState,
     alert_throttler: AlertThrottler,
 }
 
 impl RuntimePipeline {
-    pub(crate) fn new(
-        config_root: &Path,
-        workspace_inputs: &[PathBuf],
-        capture_control: Option<CaptureControl>,
-    ) -> Result<Self> {
+    pub fn new(config_root: &Path, workspace_inputs: &[PathBuf]) -> Result<Self> {
         let sensitive = SensitiveConfig::load(&config_root.join("config/sensitive.toml"))?;
         let agent_config = AgentConfig::load(&config_root.join("config/agents.toml"))?;
         let injection_keywords =
@@ -75,8 +53,6 @@ impl RuntimePipeline {
             graph.seed_from_snapshot(&snapshot, env_evidence);
         }
 
-        let attach_sink = attach_sink(capture_control);
-        let seen_capture_candidates = graph.capture_candidates().len();
         Ok(Self {
             collector: CollectorCore::new(),
             agent_config,
@@ -84,17 +60,15 @@ impl RuntimePipeline {
             state_net: StateNet::new(),
             graph,
             detectors: DetectorEngine::new(),
-            capture: CaptureReconciler::new(attach_sink, ProcMapsProvider),
-            capture_statuses: BTreeMap::new(),
-            seen_capture_candidates,
             content: ContentRuntime::new(),
             prompts: PromptStore::default(),
+            pending_prompts: BTreeMap::new(),
             capi: CapiState::new(injection_keywords),
             alert_throttler: AlertThrottler::default(),
         })
     }
 
-    pub(crate) fn process_raw_event_bytes(
+    pub fn process_raw_event_bytes(
         &mut self,
         raw: &[u8],
         sink: &mut dyn Write,
@@ -122,6 +96,30 @@ impl RuntimePipeline {
         Ok(emitted)
     }
 
+    pub fn seed_startup_snapshot(&mut self, snapshot: &ProcessSnapshot, env_evidence: EnvEvidence) {
+        self.graph.seed_from_snapshot(snapshot, env_evidence);
+    }
+
+    pub fn apply_env_evidence(&mut self, pid: u32, env_evidence: EnvEvidence, ts_ns: u64) {
+        self.graph.apply_env_evidence(pid, env_evidence, ts_ns);
+    }
+
+    pub fn process_replay_event(
+        &mut self,
+        ingest_seq: u64,
+        event: &OwnedEvent,
+        sink: &mut dyn Write,
+        dry_run: bool,
+    ) -> Result<usize> {
+        match event {
+            OwnedEvent::ContentFrag(evt) => {
+                self.process_content_fragment(evt);
+                Ok(0)
+            }
+            _ => self.process_owned_event(ingest_seq, event, sink, dry_run),
+        }
+    }
+
     pub(crate) fn collector_counters(&self) -> &veriskein_collector::CollectorCounters {
         self.collector.counters()
     }
@@ -129,13 +127,9 @@ impl RuntimePipeline {
     fn process_content_fragment(&mut self, evt: &OwnedContentFragEvent) {
         for prompt in handle_content_fragment(evt, &self.graph, &self.state_net, &mut self.content)
         {
-            if let Some(input) = prompt_input_from_extraction(evt, prompt) {
-                let prompt_id = self.prompts.insert(input);
-                if let Some(snapshot) = self.prompts.snapshot(prompt_id) {
-                    self.capi.observe_prompt(snapshot);
-                }
-            }
+            self.observe_extracted_prompt(evt.header.pid, evt.header.ts_ns, prompt);
         }
+        self.evict_pending_prompts(evt.header.ts_ns);
     }
 
     fn process_owned_event(
@@ -148,6 +142,7 @@ impl RuntimePipeline {
         let mut emitted = 0;
         for normalized in self.normalizer.apply(ingest_seq, event) {
             self.apply_state(&normalized);
+            self.drain_pending_prompts_for_event(&normalized);
             let prompt_evidence =
                 prompt_evidence_for_event(&mut self.prompts, &self.graph, &normalized);
             let mut findings = self.detectors.detect_with_prompt_evidence(
@@ -156,14 +151,6 @@ impl RuntimePipeline {
                 dry_run,
                 &prompt_evidence,
             );
-            for finding in &mut findings {
-                apply_capture_health(
-                    finding,
-                    &normalized,
-                    &prompt_evidence,
-                    self.capture_statuses.get(&normalized.process.pid),
-                );
-            }
             self.observe_capi_file_event(&normalized);
             findings.extend(self.capi_findings_for_event(&normalized, &findings));
             for finding in findings {
@@ -182,24 +169,6 @@ impl RuntimePipeline {
                 .apply_env_evidence(normalized.process.pid, env_evidence, normalized.ts_ns);
         }
         self.graph.apply(normalized);
-        self.reconcile_capture(normalized);
-    }
-
-    fn reconcile_capture(&mut self, normalized: &NormalizedEvent) {
-        for candidate in &self.graph.capture_candidates()[self.seen_capture_candidates..] {
-            if let Ok(status) = self.capture.apply_candidate(candidate, normalized.ts_ns) {
-                self.capture_statuses.insert(status.pid, status);
-            }
-        }
-        self.seen_capture_candidates = self.graph.capture_candidates().len();
-        if let Some(binding) = self.graph.resolve(normalized.process.pid)
-            && role_allows_capture(binding.role)
-            && let Ok(status) =
-                self.capture
-                    .reconcile_role(normalized.process.pid, binding.role, normalized.ts_ns)
-        {
-            self.capture_statuses.insert(status.pid, status);
-        }
     }
 
     fn observe_capi_file_event(&mut self, normalized: &NormalizedEvent) {
@@ -239,6 +208,67 @@ impl RuntimePipeline {
             .observe_file_event(file_input, read_artifact_excerpt);
     }
 
+    fn observe_extracted_prompt(&mut self, pid: u32, ts_ns: u64, mut prompt: ExtractedPrompt) {
+        if prompt.owner.session_id.is_none()
+            && let Some(binding) = self.graph.resolve(pid)
+        {
+            prompt.owner = StreamOwner::new(Some(binding.session_id), Some(binding.agent_id));
+        }
+        if !self.insert_prompt(ts_ns, prompt.clone()) {
+            self.pending_prompts
+                .entry(pid)
+                .or_default()
+                .push(PendingPrompt { ts_ns, prompt });
+        }
+    }
+
+    fn drain_pending_prompts_for_event(&mut self, normalized: &NormalizedEvent) {
+        self.drain_pending_prompts_for_pid(normalized.process.pid, normalized.ts_ns);
+        if let NormalizedData::ProcFork { child_pid, .. } = normalized.data {
+            self.drain_pending_prompts_for_pid(child_pid, normalized.ts_ns);
+        }
+        self.evict_pending_prompts(normalized.ts_ns);
+    }
+
+    fn drain_pending_prompts_for_pid(&mut self, pid: u32, now_ns: u64) {
+        let Some(binding) = self.graph.resolve(pid).cloned() else {
+            return;
+        };
+        let Some(mut pending) = self.pending_prompts.remove(&pid) else {
+            return;
+        };
+        let owner = StreamOwner::new(Some(binding.session_id), Some(binding.agent_id));
+        for mut pending_prompt in pending.drain(..) {
+            pending_prompt.prompt.owner = owner.clone();
+            if !self.insert_prompt(pending_prompt.ts_ns, pending_prompt.prompt.clone()) {
+                self.pending_prompts
+                    .entry(pid)
+                    .or_default()
+                    .push(pending_prompt);
+            }
+        }
+        self.evict_pending_prompts(now_ns);
+    }
+
+    fn evict_pending_prompts(&mut self, now_ns: u64) {
+        let ttl_ns = defaults::PROMPT_WINDOW_MS * 1_000_000;
+        self.pending_prompts.retain(|_, prompts| {
+            prompts.retain(|prompt| prompt.ts_ns.saturating_add(ttl_ns) >= now_ns);
+            !prompts.is_empty()
+        });
+    }
+
+    fn insert_prompt(&mut self, ts_ns: u64, prompt: ExtractedPrompt) -> bool {
+        let Some(input) = prompt_input_from_extraction(ts_ns, prompt) else {
+            return false;
+        };
+        let prompt_id = self.prompts.insert(input);
+        if let Some(snapshot) = self.prompts.snapshot(prompt_id) {
+            self.capi.observe_prompt(snapshot);
+        }
+        true
+    }
+
     fn capi_findings_for_event(
         &mut self,
         normalized: &NormalizedEvent,
@@ -271,6 +301,12 @@ impl RuntimePipeline {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PendingPrompt {
+    ts_ns: u64,
+    prompt: ExtractedPrompt,
+}
+
 const O_WRONLY: u32 = 1;
 const O_RDWR: u32 = 2;
 const O_ACCMODE: u32 = 3;
@@ -285,13 +321,6 @@ fn file_access_modes(flags: u32) -> (bool, bool) {
         || access_mode == O_RDWR
         || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
     (is_read, is_write)
-}
-
-fn attach_sink(capture_control: Option<CaptureControl>) -> Box<dyn AttachSink + Send> {
-    capture_control
-        .map(RuntimeAttachSink::new)
-        .map(|sink| Box::new(sink) as Box<dyn AttachSink + Send>)
-        .unwrap_or_else(|| Box::new(NoopAttachSink))
 }
 
 fn handle_content_fragment(
@@ -336,17 +365,14 @@ fn handle_content_fragment(
     content.append(fragment)
 }
 
-fn prompt_input_from_extraction(
-    evt: &OwnedContentFragEvent,
-    prompt: ExtractedPrompt,
-) -> Option<PromptInput> {
+fn prompt_input_from_extraction(ts_ns: u64, prompt: ExtractedPrompt) -> Option<PromptInput> {
     Some(PromptInput {
         session_id: prompt.owner.session_id?,
         agent_id: prompt.owner.agent_id,
         stream_id: prompt.stream_id,
         capture_mode: prompt.provenance.channel,
-        ts_start: evt.header.ts_ns,
-        ts_end: evt.header.ts_ns,
+        ts_start: ts_ns,
+        ts_end: ts_ns,
         excerpt: prompt.text.into_bytes(),
         visibility_state: prompt.visibility,
         degraded: !prompt.degradation_reasons.is_empty(),
@@ -368,47 +394,6 @@ fn prompt_evidence_for_event(
         normalized.kind.as_str(),
         normalized.ingest_seq,
     )
-}
-
-fn apply_capture_health(
-    finding: &mut Finding,
-    normalized: &NormalizedEvent,
-    prompt_evidence: &[PromptEvidence],
-    status: Option<&CaptureStatus>,
-) {
-    let has_risk_link = prompt_evidence
-        .iter()
-        .any(|evidence| matches!(evidence.kind, PromptEvidenceKind::RiskLink { .. }));
-    if has_risk_link || finding.finding_type == FindingType::ExecObserved {
-        return;
-    }
-    let Some(status) = status else {
-        return;
-    };
-    let Some(note) = capture_health_note(status) else {
-        return;
-    };
-    finding.health.visibility_state = status.visibility_state;
-    finding.health.prompt_evidence_state = veriskein_detectors::PromptEvidenceState::Unavailable;
-    finding.health.capture_lag_ms = Some(status.capture_lag_ms);
-    finding.health.push_degradation_source(note.clone());
-    if finding.evidence.iter().any(|evidence| {
-        evidence.kind == "capture_health" && evidence.note.as_deref() == Some(&note)
-    }) {
-        return;
-    }
-    finding
-        .evidence
-        .push(FindingEvidence::capture_health(normalized, note));
-}
-
-fn capture_health_note(status: &CaptureStatus) -> Option<String> {
-    match status.visibility_state {
-        VisibilityState::Full => None,
-        VisibilityState::Unsupported => Some("unsupported_tls".to_string()),
-        VisibilityState::Unavailable => Some("capture_unavailable".to_string()),
-        VisibilityState::Partial => Some(format!("capture_lag_ms={}", status.capture_lag_ms)),
-    }
 }
 
 fn read_artifact_excerpt(path: &str) -> Option<Vec<u8>> {

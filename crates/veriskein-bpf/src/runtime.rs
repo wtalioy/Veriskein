@@ -1,43 +1,39 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, RingBufferBuilder, UprobeOpts};
+use libbpf_rs::{
+    ErrorKind as BpfErrorKind, Link, MapCore, Object, ObjectBuilder, RingBufferBuilder, UprobeOpts,
+};
 
 const PROC_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/proc.bpf.o"));
 const FS_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.bpf.o"));
 const NET_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/net.bpf.o"));
 const TLS_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tls_uprobe.bpf.o"));
 
+struct LoadedObject {
+    name: &'static str,
+    object: Object,
+}
+
 pub struct RuntimeEventSource {
     rx: Receiver<Vec<u8>>,
-    control_tx: Sender<ControlCommand>,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<Result<()>>>,
-}
-
-#[derive(Clone)]
-pub struct CaptureControl {
-    tx: Sender<ControlCommand>,
-}
-
-enum ControlCommand {
-    AttachOpenSsl {
-        library_path: PathBuf,
-        reply: Sender<Result<usize, String>>,
-    },
 }
 
 impl RuntimeEventSource {
     pub fn start() -> Result<Self> {
         let (tx, rx) = mpsc::channel();
-        let (control_tx, control_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
+        let openssl_libraries = discover_openssl_libraries();
 
         let worker = thread::Builder::new()
             .name("veriskein-bpf".to_string())
@@ -46,31 +42,40 @@ impl RuntimeEventSource {
                 let mut links = Vec::<Link>::new();
                 let tls_index = objects
                     .iter()
-                    .position(|object| {
-                        object
-                            .name()
-                            .is_some_and(|name| name.to_string_lossy() == "tls_uprobe")
-                    })
+                    .position(|loaded| loaded.name == "tls_uprobe")
                     .context("find tls_uprobe BPF object")?;
 
                 // Attach every program before building the ring buffer so probe
                 // activation is all-or-nothing from the daemon's perspective.
-                for (index, object) in objects.iter_mut().enumerate() {
+                for (index, loaded) in objects.iter_mut().enumerate() {
                     if index == tls_index {
                         continue;
                     }
-                    for program in object.progs_mut() {
+                    for program in loaded.object.progs_mut() {
                         links.push(program.attach().context("attach BPF program")?);
                     }
+                }
+                for library_path in &openssl_libraries {
+                    attach_openssl_programs(
+                        &mut objects[tls_index].object,
+                        library_path,
+                        &mut links,
+                    )
+                    .with_context(|| {
+                        format!("attach OpenSSL TLS probes in {}", library_path.display())
+                    })?;
                 }
 
                 let event_maps: Vec<_> = objects
                     .iter()
-                    .map(|object| {
-                        object
+                    .map(|loaded| {
+                        loaded
+                            .object
                             .maps()
                             .find(|map| map.name().to_string_lossy() == "events")
-                            .context("find ringbuf map `events`")
+                            .with_context(|| {
+                                format!("find ringbuf map `events` in {}", loaded.name)
+                            })
                     })
                     .collect::<Result<_>>()?;
 
@@ -89,12 +94,11 @@ impl RuntimeEventSource {
                 let ringbuf = builder.build().context("build ringbuf")?;
 
                 while !worker_shutdown.load(Ordering::Relaxed) {
-                    while let Ok(command) = control_rx.try_recv() {
-                        handle_control_command(command, &mut objects[tls_index], &mut links);
+                    match ringbuf.poll(Duration::from_millis(200)) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == BpfErrorKind::Interrupted => continue,
+                        Err(err) => return Err(err).context("poll ringbuf"),
                     }
-                    ringbuf
-                        .poll(Duration::from_millis(200))
-                        .context("poll ringbuf")?;
                 }
 
                 drop(objects);
@@ -105,31 +109,24 @@ impl RuntimeEventSource {
 
         Ok(Self {
             rx,
-            control_tx,
             shutdown,
             worker: Some(worker),
         })
     }
 
-    pub fn capture_control(&self) -> CaptureControl {
-        CaptureControl {
-            tx: self.control_tx.clone(),
-        }
-    }
-
-    pub fn try_recv(&self) -> Result<Option<Vec<u8>>> {
+    pub fn try_recv(&mut self) -> Result<Option<Vec<u8>>> {
         match self.rx.try_recv() {
             Ok(bytes) => Ok(Some(bytes)),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow!("BPF worker disconnected")),
+            Err(mpsc::TryRecvError::Disconnected) => self.worker_exit_error(),
         }
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<Vec<u8>>> {
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>> {
         match self.rx.recv_timeout(timeout) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!("BPF worker disconnected")),
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.worker_exit_error(),
         }
     }
 
@@ -142,20 +139,16 @@ impl RuntimeEventSource {
         }
         Ok(())
     }
-}
 
-impl CaptureControl {
-    pub fn attach_openssl_library(&self, library_path: impl AsRef<Path>) -> Result<usize> {
-        let (reply, rx) = mpsc::channel();
-        self.tx
-            .send(ControlCommand::AttachOpenSsl {
-                library_path: library_path.as_ref().to_path_buf(),
-                reply,
-            })
-            .context("send OpenSSL attach request")?;
-        rx.recv()
-            .context("receive OpenSSL attach result")?
-            .map_err(anyhow::Error::msg)
+    fn worker_exit_error<T>(&mut self) -> Result<T> {
+        let Some(worker) = self.worker.take() else {
+            return Err(anyhow!("BPF worker disconnected"));
+        };
+        match worker.join() {
+            Ok(Ok(())) => Err(anyhow!("BPF worker exited unexpectedly")),
+            Ok(Err(err)) => Err(err.context("BPF worker exited")),
+            Err(_) => Err(anyhow!("BPF worker panicked")),
+        }
     }
 }
 
@@ -165,7 +158,7 @@ impl Drop for RuntimeEventSource {
     }
 }
 
-fn load_objects() -> Result<Vec<Object>> {
+fn load_objects() -> Result<Vec<LoadedObject>> {
     // Runtime loading order matches the logical ownership split in `bpf/` and
     // keeps object-specific errors easy to attribute.
     [
@@ -176,26 +169,14 @@ fn load_objects() -> Result<Vec<Object>> {
     ]
     .into_iter()
     .map(|(name, bytes)| {
-        ObjectBuilder::default()
+        let object = ObjectBuilder::default()
             .open_memory(bytes)
             .with_context(|| format!("open {name} BPF object"))?
             .load()
-            .with_context(|| format!("load {name} BPF object"))
+            .with_context(|| format!("load {name} BPF object"))?;
+        Ok(LoadedObject { name, object })
     })
     .collect()
-}
-
-fn handle_control_command(command: ControlCommand, tls_object: &mut Object, links: &mut Vec<Link>) {
-    match command {
-        ControlCommand::AttachOpenSsl {
-            library_path,
-            reply,
-        } => {
-            let result = attach_openssl_programs(tls_object, &library_path, links)
-                .map_err(|err| format!("{err:#}"));
-            let _ = reply.send(result);
-        }
-    }
 }
 
 fn attach_openssl_programs(
@@ -231,4 +212,55 @@ fn attach_openssl_programs(
         );
     }
     Ok(links.len() - start_len)
+}
+
+fn discover_openssl_libraries() -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for path in ldconfig_openssl_paths() {
+        paths.insert(path);
+    }
+    for candidate in [
+        "/lib/x86_64-linux-gnu/libssl.so.3",
+        "/usr/lib/x86_64-linux-gnu/libssl.so.3",
+        "/lib64/libssl.so.3",
+        "/usr/lib64/libssl.so.3",
+        "/usr/lib/libssl.so.3",
+        "/lib/x86_64-linux-gnu/libssl.so.1.1",
+        "/usr/lib/x86_64-linux-gnu/libssl.so.1.1",
+        "/lib64/libssl.so.1.1",
+        "/usr/lib64/libssl.so.1.1",
+        "/usr/lib/libssl.so.1.1",
+    ] {
+        paths.insert(PathBuf::from(candidate));
+    }
+    paths
+        .into_iter()
+        .filter(|path| path.is_file() && is_supported_openssl_path(path))
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn ldconfig_openssl_paths() -> Vec<PathBuf> {
+    let Ok(output) = Command::new("ldconfig").arg("-p").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            line.split_once("=>")
+                .map(|(_, path)| PathBuf::from(path.trim()))
+        })
+        .filter(|path| is_supported_openssl_path(path))
+        .collect()
+}
+
+fn is_supported_openssl_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("libssl.so.3") || name.starts_with("libssl.so.1.1"))
 }

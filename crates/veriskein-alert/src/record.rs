@@ -50,7 +50,6 @@ pub struct AlertFallback {
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertCapture {
     pub mode: &'static str,
-    pub lag_ms: Option<u64>,
     pub redaction: &'static str,
 }
 
@@ -137,7 +136,6 @@ impl AlertRecord {
             },
             capture: AlertCapture {
                 mode: capture_mode(finding.health.prompt_evidence_state),
-                lag_ms: finding.health.capture_lag_ms,
                 redaction: redaction_mode(finding),
             },
             explanation: finding.explanation.clone(),
@@ -275,6 +273,9 @@ impl AlertThrottler {
         let mut alert = AlertRecord::from_finding(finding);
         let key = throttle_key(&alert);
         let window_ns = defaults::ALERT_DEDUP_SECS * 1_000_000_000;
+        self.entries.retain(|entry_key, entry| {
+            entry_key == &key || alert.ts_ns.saturating_sub(entry.first_alert.ts_ns) < window_ns
+        });
         let Some(entry) = self.entries.get_mut(&key) else {
             self.entries.insert(
                 key,

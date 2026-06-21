@@ -47,7 +47,6 @@ pub struct FindingHealth {
     pub visibility_state: VisibilityState,
     pub prompt_evidence_state: PromptEvidenceState,
     pub degradation_sources: Vec<String>,
-    pub capture_lag_ms: Option<u64>,
 }
 
 impl FindingHealth {
@@ -56,7 +55,6 @@ impl FindingHealth {
             visibility_state: VisibilityState::Full,
             prompt_evidence_state: PromptEvidenceState::Unavailable,
             degradation_sources: Vec::new(),
-            capture_lag_ms: None,
         }
     }
 
@@ -186,10 +184,6 @@ impl FindingEvidence {
             op: None,
             note,
         }
-    }
-
-    pub fn capture_health(event: &NormalizedEvent, note: String) -> Self {
-        Self::for_event("capture_health", event, None, None, None, Some(note))
     }
 
     fn for_event(

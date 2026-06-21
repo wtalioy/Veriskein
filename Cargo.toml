@@ -2,7 +2,6 @@
 members = [
     "crates/veriskein-alert",
     "crates/veriskein-bpf",
-    "crates/veriskein-capture",
     "crates/veriskein-collector",
     "crates/veriskein-content",
     "crates/veriskein-correlator",

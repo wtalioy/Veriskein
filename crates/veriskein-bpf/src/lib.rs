@@ -2,4 +2,4 @@
 
 mod runtime;
 
-pub use runtime::{CaptureControl, RuntimeEventSource};
+pub use runtime::RuntimeEventSource;

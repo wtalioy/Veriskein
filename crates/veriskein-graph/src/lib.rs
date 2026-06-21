@@ -8,6 +8,4 @@ mod tests;
 
 pub use config::AgentConfig;
 pub use evidence::{EnvEvidence, LlmEndpointResolver};
-pub use state::{
-    Attribution, CaptureCandidate, GraphState, RootEvidence, RootEvidenceKind, SessionState,
-};
+pub use state::{Attribution, GraphState, RootEvidence, RootEvidenceKind, SessionState};

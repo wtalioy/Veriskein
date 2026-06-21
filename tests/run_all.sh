@@ -22,6 +22,23 @@ if [[ -z "${CARGO_BIN}" ]]; then
   fi
 fi
 
+configure_rust_toolchain() {
+  local cargo_dir
+  cargo_dir="$(cd "$(dirname "${CARGO_BIN}")" && pwd)"
+  export PATH="${cargo_dir}:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+
+  if [[ -z "${RUSTC:-}" && -x "${cargo_dir}/rustc" ]]; then
+    export RUSTC="${cargo_dir}/rustc"
+  fi
+
+  if [[ -n "${SUDO_USER:-}" && "${CARGO_BIN}" == "/home/${SUDO_USER}/.cargo/bin/cargo" ]]; then
+    export CARGO_HOME="${CARGO_HOME:-/home/${SUDO_USER}/.cargo}"
+    export RUSTUP_HOME="${RUSTUP_HOME:-/home/${SUDO_USER}/.rustup}"
+  fi
+}
+
+configure_rust_toolchain
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --only)
