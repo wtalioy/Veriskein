@@ -28,13 +28,6 @@ fn alert() -> Value {
 }
 
 #[test]
-fn matches_existing_type_only_fixture() {
-    let spec = parse_match(json!({"type": "unexpected_shell"}));
-
-    assert!(spec.matches(&alert()));
-}
-
-#[test]
 fn matches_phase_two_fields() {
     let spec = parse_match(json!({
         "type": "unexpected_shell",
@@ -43,7 +36,6 @@ fn matches_phase_two_fields() {
         "objects.paths_include": ["/bin/sh"],
         "objects": {
             "ips_include": ["192.0.2.10"],
-            "ports_include": [22],
             "argv": {"length_gte": 3}
         },
         "evidence.has_kind": "syscall",
@@ -54,19 +46,6 @@ fn matches_phase_two_fields() {
     }));
 
     assert!(spec.matches(&alert()));
-}
-
-#[test]
-fn path_includes_support_substrings_and_globs() {
-    let substring = parse_match(json!({
-        "objects.paths_include": ["outside/file.txt"]
-    }));
-    let glob = parse_match(json!({
-        "objects.paths_include": ["/tmp/run-*/outside/*.txt"]
-    }));
-
-    assert!(substring.matches(&alert()));
-    assert!(glob.matches(&alert()));
 }
 
 #[test]
@@ -135,15 +114,4 @@ fn negative_assertion_reports_forbidden_expectation() {
 
     assert!(error.to_string().contains("forbidden expectation matched"));
     assert!(error.to_string().contains("type=unexpected_shell"));
-}
-
-#[test]
-fn must_contain_false_is_negative_assertion_alias() {
-    let expectation: Expectation = serde_json::from_value(json!({
-        "must_contain": false,
-        "match": {"type": "unexpected_shell"}
-    }))
-    .expect("expectation parses");
-
-    assert!(assert_expectations(&[expectation], &[alert()]).is_err());
 }

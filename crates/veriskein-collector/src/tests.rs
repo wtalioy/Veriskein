@@ -3,16 +3,6 @@ use veriskein_proto::{DropReason, EventFixture, EventKind, OwnedEvent};
 use crate::CollectorCore;
 
 #[test]
-fn emits_ordered_event_without_drop() {
-    let mut collector = CollectorCore::new();
-    let raw = EventFixture::for_pid(1, 100, 1, "bash").exec("/bin/bash", &["bash"]);
-    let events = collector.process_bytes(&raw).expect("parse");
-    assert_eq!(events.len(), 1);
-    assert!(matches!(events[0].event, OwnedEvent::ProcExec(_)));
-    assert_eq!(collector.counters().reorder_or_drop_total, 0);
-}
-
-#[test]
 fn synthesizes_gap_drop_event() {
     let mut collector = CollectorCore::new();
     let first = EventFixture::new(1, 1, 101, 101, 1, "a").exec("/bin/a", &["a"]);

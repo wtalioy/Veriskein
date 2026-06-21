@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, de};
 use serde_json::{Map, Value};
 
-use super::spec::{ArrayMatchMode, Criterion, MatchSpec};
+use super::spec::{Criterion, MatchSpec};
 
 impl<'de> Deserialize<'de> for MatchSpec {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
@@ -26,21 +26,12 @@ impl<'de> Deserialize<'de> for MatchSpec {
             &["objects", "paths_include"],
             &["objects", "paths"],
             "objects.paths_include",
-            ArrayMatchMode::Path,
         )?;
         parser.parse_array_includes(
             "objects.ips_include",
             &["objects", "ips_include"],
             &["objects", "ips"],
             "objects.ips_include",
-            ArrayMatchMode::Exact,
-        )?;
-        parser.parse_array_includes(
-            "objects.ports_include",
-            &["objects", "ports_include"],
-            &["objects", "ports"],
-            "objects.ports_include",
-            ArrayMatchMode::Exact,
         )?;
         parser.parse_evidence_kind()?;
         parser.parse_string_in(
@@ -121,7 +112,6 @@ impl<'a> MatchParser<'a> {
         nested_path: &[&str],
         actual_path: &'static [&'static str],
         label: &'static str,
-        match_mode: ArrayMatchMode,
     ) -> std::result::Result<(), E>
     where
         E: de::Error,
@@ -132,7 +122,6 @@ impl<'a> MatchParser<'a> {
                 path: actual_path,
                 label,
                 values: expect_array::<E>(value, label)?,
-                match_mode,
             });
         }
         Ok(())
@@ -237,24 +226,6 @@ impl<'a> MatchParser<'a> {
                 label: "causal_score_gte".to_string(),
             });
         }
-        for (key, value) in self.root {
-            let Some(score_name) = key
-                .strip_prefix("policy.component_scores.")
-                .and_then(|remaining| remaining.strip_suffix("_gte"))
-            else {
-                continue;
-            };
-            self.used.push(key.clone());
-            self.criteria.push(Criterion::NumericGte {
-                path: vec![
-                    "policy".to_string(),
-                    "component_scores".to_string(),
-                    score_name.to_string(),
-                ],
-                min: expect_f64::<E>(value, key)?,
-                label: key.clone(),
-            });
-        }
         Ok(())
     }
 
@@ -322,7 +293,7 @@ impl<'a> MatchParser<'a> {
         let unknown = collect_unknown_keys(self.root, &self.used);
         if !unknown.is_empty() {
             return Err(E::custom(format!(
-                "unsupported match key(s): {}; supported keys are type, severity_in, confidence_band_in, objects.paths_include, objects.ips_include, objects.ports_include, objects.<field>.length_gte, evidence.has_kind, fallback.mode_in, fallback.visibility_in, not_contains_text",
+                "unsupported match key(s): {}; supported keys are type, severity_in, confidence_band_in, objects.paths_include, objects.ips_include, objects.<field>.length_gte, evidence.has_kind, fallback.mode_in, fallback.visibility_in, causal_score_gte, objects.sessions_differ, not_contains_text",
                 unknown.join(", ")
             )));
         }

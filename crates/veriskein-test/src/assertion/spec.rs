@@ -5,8 +5,6 @@ use serde_json::Value;
 pub struct Expectation {
     #[serde(default)]
     pub negate: bool,
-    #[serde(default)]
-    pub must_contain: Option<bool>,
     #[serde(rename = "match")]
     pub match_: MatchSpec,
 }
@@ -28,7 +26,6 @@ pub(super) enum Criterion {
         path: &'static [&'static str],
         label: &'static str,
         values: Vec<Value>,
-        match_mode: ArrayMatchMode,
     },
     LengthGte {
         path: Vec<String>,
@@ -50,15 +47,9 @@ pub(super) enum Criterion {
     SessionsDiffer,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) enum ArrayMatchMode {
-    Exact,
-    Path,
-}
-
 impl Expectation {
     pub(super) fn is_forbidden(&self) -> bool {
-        self.negate || self.must_contain == Some(false)
+        self.negate
     }
 }
 

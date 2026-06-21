@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::spec::{ArrayMatchMode, Criterion, MatchSpec};
+use super::spec::{Criterion, MatchSpec};
 
 impl MatchSpec {
     pub(crate) fn matches(&self, actual: &Value) -> bool {
@@ -25,17 +25,12 @@ impl Criterion {
             Self::FieldIn { path, values, .. } => get_path(actual, path)
                 .and_then(Value::as_str)
                 .is_some_and(|actual| values.iter().any(|expected| expected == actual)),
-            Self::ArrayIncludes {
-                path,
-                values,
-                match_mode,
-                ..
-            } => get_path(actual, path)
+            Self::ArrayIncludes { path, values, .. } => get_path(actual, path)
                 .and_then(Value::as_array)
                 .is_some_and(|actual| {
                     values
                         .iter()
-                        .all(|expected| array_contains(actual, expected, *match_mode))
+                        .all(|expected| array_contains(actual, expected))
                 }),
             Self::LengthGte { path, min, .. } => get_owned_path(actual, path)
                 .and_then(Value::as_array)
@@ -86,49 +81,12 @@ fn get_owned_path<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
         .try_fold(value, |current, key| current.get(key.as_str()))
 }
 
-fn array_contains(actual: &[Value], expected: &Value, match_mode: ArrayMatchMode) -> bool {
+fn array_contains(actual: &[Value], expected: &Value) -> bool {
     if let Some(expected) = expected.as_str() {
         return actual
             .iter()
             .filter_map(Value::as_str)
-            .any(|actual| string_matches(actual, expected, match_mode));
+            .any(|actual| actual == expected || actual.contains(expected));
     }
     actual.contains(expected)
-}
-
-fn string_matches(actual: &str, expected: &str, match_mode: ArrayMatchMode) -> bool {
-    match match_mode {
-        ArrayMatchMode::Exact => actual == expected,
-        ArrayMatchMode::Path => {
-            actual == expected
-                || actual.contains(expected)
-                || (contains_glob_meta(expected) && globish_matches(expected, actual))
-        }
-    }
-}
-
-fn contains_glob_meta(pattern: &str) -> bool {
-    pattern.contains('*') || pattern.contains('?')
-}
-
-fn globish_matches(pattern: &str, actual: &str) -> bool {
-    let pattern = pattern.as_bytes();
-    let actual = actual.as_bytes();
-    let mut matched = vec![vec![false; actual.len() + 1]; pattern.len() + 1];
-    matched[0][0] = true;
-    for pidx in 1..=pattern.len() {
-        if pattern[pidx - 1] == b'*' {
-            matched[pidx][0] = matched[pidx - 1][0];
-        }
-    }
-    for pidx in 1..=pattern.len() {
-        for aidx in 1..=actual.len() {
-            matched[pidx][aidx] = match pattern[pidx - 1] {
-                b'*' => matched[pidx - 1][aidx] || matched[pidx][aidx - 1],
-                b'?' => matched[pidx - 1][aidx - 1],
-                byte => matched[pidx - 1][aidx - 1] && byte == actual[aidx - 1],
-            };
-        }
-    }
-    matched[pattern.len()][actual.len()]
 }
