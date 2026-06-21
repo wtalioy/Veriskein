@@ -1,10 +1,12 @@
 use serde::Serialize;
+pub use veriskein_proto::VisibilityState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum FindingType {
     UnexpectedShell,
     SensitiveFileAccess,
     OutOfWorkspaceDeletion,
+    SingleAgentDeadloop,
     ExecObserved,
 }
 
@@ -14,17 +16,10 @@ impl FindingType {
             Self::UnexpectedShell => "unexpected_shell",
             Self::SensitiveFileAccess => "sensitive_file_access",
             Self::OutOfWorkspaceDeletion => "out_of_workspace_deletion",
+            Self::SingleAgentDeadloop => "single_agent_deadloop",
             Self::ExecObserved => "exec_observed",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum VisibilityState {
-    Full,
-    Partial,
-    Unsupported,
-    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -35,6 +30,8 @@ pub struct FindingHealth {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FindingObjects {
     pub paths: Vec<String>,
+    pub ips: Vec<String>,
+    pub ports: Vec<u16>,
     pub event_ids: Vec<String>,
     pub argv: Vec<String>,
 }
@@ -45,10 +42,12 @@ pub struct FindingEvidence {
     pub event_id: String,
     pub ingest_seq: u64,
     pub path: Option<String>,
+    pub ip: Option<String>,
+    pub port: Option<u16>,
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Finding {
     pub finding_type: FindingType,
     pub ts_ns: u64,
@@ -64,4 +63,5 @@ pub struct Finding {
     pub objects: FindingObjects,
     pub evidence: Vec<FindingEvidence>,
     pub health: FindingHealth,
+    pub component_scores: std::collections::BTreeMap<&'static str, f32>,
 }

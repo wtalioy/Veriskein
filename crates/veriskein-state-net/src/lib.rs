@@ -1,3 +1,7 @@
-//! Placeholder crate for later connection and socket state ownership.
-//! Leaving this boundary explicit keeps socket lifecycle state out of the
-//! normalizer once network attribution becomes richer.
+//! Connection and fd identity state for Phase 2+ stream ownership.
+
+mod state;
+#[cfg(test)]
+mod tests;
+
+pub use state::{EndpointAddr, EndpointSnapshot, FdIdentityKind, FdIdentitySnapshot, StateNet};

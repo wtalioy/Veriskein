@@ -10,6 +10,12 @@ pub struct AgentConfig {
     #[serde(default)]
     pub binary_seeds: Vec<String>,
     #[serde(default)]
+    pub env_hints: Vec<String>,
+    #[serde(default)]
+    pub argv_hints: Vec<String>,
+    #[serde(default)]
+    pub llm_endpoints: Vec<String>,
+    #[serde(default)]
     pub shell_allowlist: Vec<String>,
     #[serde(default)]
     pub sensitive_allowlist: Vec<String>,

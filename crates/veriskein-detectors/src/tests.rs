@@ -5,7 +5,7 @@ use veriskein_normalizer::{
 };
 use veriskein_proto::EventKind;
 
-use crate::{FindingType, detect};
+use crate::{DetectorEngine, FindingType, detect};
 
 const TEST_PID: u32 = 10;
 
@@ -14,6 +14,9 @@ fn graph() -> GraphState {
         AgentConfig {
             default_workspace: "/tmp/ws".to_string(),
             binary_seeds: vec!["claude".to_string()],
+            env_hints: Vec::new(),
+            argv_hints: Vec::new(),
+            llm_endpoints: Vec::new(),
             shell_allowlist: Vec::new(),
             sensitive_allowlist: Vec::new(),
             delete_allowlist: vec!["/tmp/allowed.txt".to_string()],
@@ -82,6 +85,68 @@ fn event(
     }
 }
 
+fn net_connect_event(seq: u64, pid: u32, ip: &str, port: u16) -> NormalizedEvent {
+    NormalizedEvent {
+        ingest_seq: seq,
+        event_id: format!("net-{seq}"),
+        ts_ns: seq * 1_000_000,
+        kind: EventKind::NetConnect,
+        process: process(pid, "/usr/bin/claude", "claude", "/tmp/ws"),
+        data: NormalizedData::NetConnect {
+            sockfd: 3,
+            dport_be: port.to_be(),
+            dst_ip: Some(ip.to_string()),
+            dst_port: Some(port),
+            tls_candidate: port == 443,
+        },
+    }
+}
+
+fn file_open_event(seq: u64, pid: u32, path: &str) -> NormalizedEvent {
+    NormalizedEvent {
+        ingest_seq: seq,
+        event_id: format!("file-{seq}"),
+        ts_ns: seq * 1_000_000,
+        kind: EventKind::FileOpen,
+        process: process(pid, "/usr/bin/claude", "claude", "/tmp/ws"),
+        data: NormalizedData::FileOpen {
+            ret_fd: 3,
+            flags: 0,
+            path: path_context(path, None, false),
+        },
+    }
+}
+
+fn workspace_write_event(seq: u64, pid: u32, path: &str) -> NormalizedEvent {
+    NormalizedEvent {
+        ingest_seq: seq,
+        event_id: format!("write-{seq}"),
+        ts_ns: seq * 1_000_000,
+        kind: EventKind::FileOpen,
+        process: process(pid, "/usr/bin/claude", "claude", "/tmp/ws"),
+        data: NormalizedData::FileOpen {
+            ret_fd: 3,
+            flags: 64,
+            path: path_context(path, Some("/tmp/ws"), false),
+        },
+    }
+}
+
+fn sensitive_file_open_event(seq: u64, pid: u32, path: &str) -> NormalizedEvent {
+    NormalizedEvent {
+        ingest_seq: seq,
+        event_id: format!("sensitive-file-{seq}"),
+        ts_ns: seq * 1_000_000,
+        kind: EventKind::FileOpen,
+        process: process(pid, "/usr/bin/claude", "claude", "/tmp/ws"),
+        data: NormalizedData::FileOpen {
+            ret_fd: 3,
+            flags: 0,
+            path: path_context(path, None, true),
+        },
+    }
+}
+
 #[test]
 fn unexpected_shell_fires() {
     let findings = detect(
@@ -109,6 +174,7 @@ fn sensitive_access_fires() {
             process(TEST_PID, "/usr/bin/claude", "claude", "/tmp/ws"),
             NormalizedData::FileOpen {
                 ret_fd: 3,
+                flags: 0,
                 path: path_context("/etc/shadow", None, true),
             },
         ),
@@ -127,6 +193,7 @@ fn denied_sensitive_access_still_fires() {
             process(TEST_PID, "/usr/bin/claude", "claude", "/tmp/ws"),
             NormalizedData::FileOpen {
                 ret_fd: -13,
+                flags: 0,
                 path: path_context("/etc/shadow", None, true),
             },
         ),
@@ -143,6 +210,9 @@ fn benign_shell_negative_when_not_in_session() {
         AgentConfig {
             default_workspace: "/tmp/ws".to_string(),
             binary_seeds: vec!["claude".to_string()],
+            env_hints: Vec::new(),
+            argv_hints: Vec::new(),
+            llm_endpoints: Vec::new(),
             shell_allowlist: Vec::new(),
             sensitive_allowlist: Vec::new(),
             delete_allowlist: Vec::new(),
@@ -177,6 +247,9 @@ fn delete_allowlist_uses_glob() {
         AgentConfig {
             default_workspace: "/tmp/ws".to_string(),
             binary_seeds: vec!["claude".to_string()],
+            env_hints: Vec::new(),
+            argv_hints: Vec::new(),
+            llm_endpoints: Vec::new(),
             shell_allowlist: Vec::new(),
             sensitive_allowlist: Vec::new(),
             delete_allowlist: vec!["/tmp/**".to_string()],
@@ -273,5 +346,198 @@ fn successful_outside_workspace_delete_alerts() {
     assert_eq!(
         findings[0].finding_type,
         FindingType::OutOfWorkspaceDeletion
+    );
+}
+
+#[test]
+fn deadloop_core_path_requires_two_rules() {
+    let graph = graph();
+    let mut engine = DetectorEngine::new();
+    let mut findings = Vec::new();
+    for seq in 1..=60 {
+        findings.extend(engine.detect(
+            &net_connect_event(seq, TEST_PID, "127.0.0.1", 443),
+            &graph,
+            false,
+        ));
+    }
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.finding_type != FindingType::SingleAgentDeadloop)
+    );
+
+    for seq in 61..=80 {
+        findings.extend(engine.detect(
+            &file_open_event(seq, TEST_PID, "/tmp/loopfile"),
+            &graph,
+            false,
+        ));
+    }
+    let deadloop = findings
+        .iter()
+        .find(|finding| finding.finding_type == FindingType::SingleAgentDeadloop)
+        .expect("deadloop should fire");
+    assert!(
+        deadloop
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "net_connect")
+    );
+    assert!(
+        deadloop
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "file_access")
+    );
+    assert_eq!(deadloop.objects.ips, vec!["127.0.0.1".to_string()]);
+    assert_eq!(deadloop.component_scores.get("low_progress"), Some(&1.0));
+}
+
+#[test]
+fn deadloop_uses_session_cooldown() {
+    let graph = graph();
+    let mut engine = DetectorEngine::new();
+    let mut count = 0;
+    for seq in 1..=90 {
+        let event = if seq <= 60 {
+            net_connect_event(seq, TEST_PID, "127.0.0.1", 443)
+        } else {
+            file_open_event(seq, TEST_PID, "/tmp/loopfile")
+        };
+        count += engine
+            .detect(&event, &graph, false)
+            .into_iter()
+            .filter(|finding| finding.finding_type == FindingType::SingleAgentDeadloop)
+            .count();
+    }
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn deadloop_evidence_uses_threshold_endpoint_and_path() {
+    let graph = graph();
+    let mut engine = DetectorEngine::new();
+    let mut findings = Vec::new();
+
+    findings.extend(engine.detect(
+        &net_connect_event(1, TEST_PID, "10.0.0.2", 443),
+        &graph,
+        false,
+    ));
+    for seq in 2..=61 {
+        findings.extend(engine.detect(
+            &net_connect_event(seq, TEST_PID, "127.0.0.1", 443),
+            &graph,
+            false,
+        ));
+    }
+    findings.extend(engine.detect(&file_open_event(62, TEST_PID, "/tmp/other"), &graph, false));
+    for seq in 63..=82 {
+        findings.extend(engine.detect(
+            &file_open_event(seq, TEST_PID, "/tmp/loopfile"),
+            &graph,
+            false,
+        ));
+    }
+
+    let deadloop = findings
+        .iter()
+        .find(|finding| finding.finding_type == FindingType::SingleAgentDeadloop)
+        .expect("deadloop should fire");
+    assert_eq!(deadloop.objects.ips, vec!["127.0.0.1".to_string()]);
+    assert_eq!(deadloop.objects.paths, vec!["/tmp/loopfile".to_string()]);
+}
+
+#[test]
+fn deadloop_counts_sensitive_file_activity() {
+    let graph = graph();
+    let mut engine = DetectorEngine::new();
+    let mut findings = Vec::new();
+
+    for seq in 1..=60 {
+        findings.extend(engine.detect(
+            &net_connect_event(seq, TEST_PID, "127.0.0.1", 443),
+            &graph,
+            false,
+        ));
+    }
+    for seq in 61..=80 {
+        findings.extend(engine.detect(
+            &sensitive_file_open_event(seq, TEST_PID, "/etc/shadow"),
+            &graph,
+            false,
+        ));
+    }
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.finding_type == FindingType::SingleAgentDeadloop)
+    );
+}
+
+#[test]
+fn deadloop_progress_signals_suppress_low_progress_rule() {
+    let graph = graph();
+    let mut engine = DetectorEngine::new();
+    let mut findings = Vec::new();
+
+    for seq in 1..=60 {
+        findings.extend(engine.detect(
+            &net_connect_event(seq, TEST_PID, "127.0.0.1", 443),
+            &graph,
+            false,
+        ));
+    }
+    for seq in 61..=80 {
+        findings.extend(engine.detect(
+            &workspace_write_event(seq, TEST_PID, "/tmp/ws/progress.txt"),
+            &graph,
+            false,
+        ));
+    }
+
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.finding_type != FindingType::SingleAgentDeadloop)
+    );
+}
+
+#[test]
+fn deadloop_progress_signals_expire_with_window() {
+    let graph = graph();
+    let mut engine = DetectorEngine::new();
+    let mut findings = Vec::new();
+
+    for seq in 1..=10 {
+        findings.extend(engine.detect(
+            &workspace_write_event(seq, TEST_PID, &format!("/tmp/ws/progress-{seq}.txt")),
+            &graph,
+            false,
+        ));
+    }
+
+    let base = 10 + veriskein_proto::defaults::DEADLOOP_WINDOW_S * 1_000;
+    for seq in base..base + 60 {
+        findings.extend(engine.detect(
+            &net_connect_event(seq, TEST_PID, "127.0.0.1", 443),
+            &graph,
+            false,
+        ));
+    }
+    for seq in base + 60..base + 80 {
+        findings.extend(engine.detect(
+            &file_open_event(seq, TEST_PID, "/tmp/loopfile"),
+            &graph,
+            false,
+        ));
+    }
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.finding_type == FindingType::SingleAgentDeadloop)
     );
 }

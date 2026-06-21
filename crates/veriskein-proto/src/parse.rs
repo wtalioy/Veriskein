@@ -93,27 +93,20 @@ pub fn parse_path_pair(bytes: &[u8]) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        DropReason, EventKind, EventRef, OwnedEvent, build_exec_event_bytes,
-        build_fd_dup_event_bytes, build_file_open_event_bytes, build_file_rename_event_bytes,
-        build_file_unlink_event_bytes, build_meta_drop_event_bytes, build_net_connect_event_bytes,
-        build_proc_chdir_event_bytes, build_proc_exit_event_bytes, build_proc_fork_event_bytes,
-    };
+    use crate::{DropReason, EventFixture, EventKind, EventRef, OwnedEvent};
 
     use super::{ParseError, parse, parse_c_string};
 
+    fn parse_owned(raw: Vec<u8>, label: &str) -> OwnedEvent {
+        parse(&raw)
+            .unwrap_or_else(|_| panic!("{label} should parse"))
+            .to_owned()
+    }
+
     #[test]
     fn parse_exec_roundtrip() {
-        let raw = build_exec_event_bytes(
-            3,
-            7,
-            4242,
-            4242,
-            1,
-            "bash",
-            "/bin/bash",
-            &["bash", "-lc", "true"],
-        );
+        let raw = EventFixture::new(3, 7, 4242, 4242, 1, "bash")
+            .exec("/bin/bash", &["bash", "-lc", "true"]);
         let parsed = parse(&raw).expect("exec event should parse");
         match parsed {
             EventRef::ProcExec(evt) => {
@@ -135,9 +128,8 @@ mod tests {
 
     #[test]
     fn parse_proc_fork_roundtrip() {
-        let raw = build_proc_fork_event_bytes(0, 1, 100, 100, 1, "claude", 101, 101);
-        let parsed = parse(&raw).expect("fork event should parse");
-        match parsed.to_owned() {
+        let raw = EventFixture::for_pid(1, 100, 1, "claude").fork(101, 101);
+        match parse_owned(raw, "fork event") {
             OwnedEvent::ProcFork(evt) => assert_eq!(evt.child_pid, 101),
             _ => panic!("expected proc fork"),
         }
@@ -145,9 +137,8 @@ mod tests {
 
     #[test]
     fn parse_file_open_roundtrip() {
-        let raw =
-            build_file_open_event_bytes(0, 2, 200, 200, 1, "python3", -100, 3, "/tmp/demo.txt");
-        match parse(&raw).expect("open should parse").to_owned() {
+        let raw = EventFixture::for_pid(2, 200, 1, "python3").open(-100, 3, "/tmp/demo.txt");
+        match parse_owned(raw, "open") {
             OwnedEvent::FileOpen(evt) => {
                 assert_eq!(evt.ret_fd, 3);
                 assert_eq!(evt.path, "/tmp/demo.txt");
@@ -158,8 +149,8 @@ mod tests {
 
     #[test]
     fn parse_net_connect_roundtrip() {
-        let raw = build_net_connect_event_bytes(0, 3, 300, 300, 1, "curl", 7, 443, true);
-        match parse(&raw).expect("connect should parse").to_owned() {
+        let raw = EventFixture::for_pid(3, 300, 1, "curl").connect(7, 443, true);
+        match parse_owned(raw, "connect") {
             OwnedEvent::NetConnect(evt) => {
                 assert_eq!(evt.sockfd, 7);
                 assert!(evt.tls_candidate);
@@ -170,8 +161,8 @@ mod tests {
 
     #[test]
     fn parse_proc_exit_roundtrip() {
-        let raw = build_proc_exit_event_bytes(0, 4, 400, 400, 1, "bash", 17);
-        match parse(&raw).expect("exit should parse").to_owned() {
+        let raw = EventFixture::for_pid(4, 400, 1, "bash").exit(17);
+        match parse_owned(raw, "exit") {
             OwnedEvent::ProcExit(evt) => assert_eq!(evt.exit_code, 17),
             _ => panic!("expected exit"),
         }
@@ -179,8 +170,8 @@ mod tests {
 
     #[test]
     fn parse_proc_chdir_roundtrip() {
-        let raw = build_proc_chdir_event_bytes(0, 5, 500, 500, 1, "bash", "/tmp/ws");
-        match parse(&raw).expect("chdir should parse").to_owned() {
+        let raw = EventFixture::for_pid(5, 500, 1, "bash").chdir("/tmp/ws");
+        match parse_owned(raw, "chdir") {
             OwnedEvent::ProcChdir(evt) => assert_eq!(evt.path, "/tmp/ws"),
             _ => panic!("expected chdir"),
         }
@@ -188,8 +179,8 @@ mod tests {
 
     #[test]
     fn parse_fd_dup_roundtrip() {
-        let raw = build_fd_dup_event_bytes(0, 6, 600, 600, 1, "bash", 3, 9, 9);
-        match parse(&raw).expect("dup should parse").to_owned() {
+        let raw = EventFixture::for_pid(6, 600, 1, "bash").dup(3, 9, 9);
+        match parse_owned(raw, "dup") {
             OwnedEvent::FdDup(evt) => {
                 assert_eq!(evt.oldfd, 3);
                 assert_eq!(evt.newfd, 9);
@@ -200,8 +191,8 @@ mod tests {
 
     #[test]
     fn parse_file_unlink_roundtrip() {
-        let raw = build_file_unlink_event_bytes(0, 7, 700, 700, 1, "bash", -100, 0, "/tmp/x");
-        match parse(&raw).expect("unlink should parse").to_owned() {
+        let raw = EventFixture::for_pid(7, 700, 1, "bash").unlink(-100, 0, "/tmp/x");
+        match parse_owned(raw, "unlink") {
             OwnedEvent::FileUnlink(evt) => assert_eq!(evt.path, "/tmp/x"),
             _ => panic!("expected unlink"),
         }
@@ -209,10 +200,9 @@ mod tests {
 
     #[test]
     fn parse_file_rename_roundtrip() {
-        let raw = build_file_rename_event_bytes(
-            0, 8, 800, 800, 1, "bash", -100, -100, 0, "/tmp/old", "/tmp/new",
-        );
-        match parse(&raw).expect("rename should parse").to_owned() {
+        let raw =
+            EventFixture::for_pid(8, 800, 1, "bash").rename(-100, -100, 0, "/tmp/old", "/tmp/new");
+        match parse_owned(raw, "rename") {
             OwnedEvent::FileRename(evt) => {
                 assert_eq!(evt.old_path, "/tmp/old");
                 assert_eq!(evt.new_path, "/tmp/new");
@@ -229,7 +219,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_abi_mismatch() {
-        let mut raw = build_exec_event_bytes(0, 1, 12, 12, 1, "sh", "/bin/sh", &["sh"]);
+        let mut raw = EventFixture::for_pid(1, 12, 1, "sh").exec("/bin/sh", &["sh"]);
         raw[8..12].copy_from_slice(&99_u32.to_ne_bytes());
         let err = parse(&raw).expect_err("abi mismatch must fail");
         assert_eq!(err, ParseError::AbiMismatch(99));
@@ -237,8 +227,8 @@ mod tests {
 
     #[test]
     fn parse_drop_roundtrip() {
-        let raw = build_meta_drop_event_bytes(1, 9, 4, 9, 5, DropReason::SeqGap);
-        match parse(&raw).expect("drop should parse").to_owned() {
+        let raw = EventFixture::new(1, 9, 0, 0, 0, "meta").meta_drop(4, 9, 5, DropReason::SeqGap);
+        match parse_owned(raw, "drop") {
             OwnedEvent::MetaDrop(evt) => {
                 assert_eq!(evt.expected_seq, 4);
                 assert_eq!(evt.observed_seq, 9);

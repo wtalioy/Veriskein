@@ -9,12 +9,15 @@ use tracing::info;
 use veriskein_alert::{AlertRecord, emit_ndjson_line, validate};
 use veriskein_bpf::RuntimeEventSource;
 use veriskein_collector::CollectorCore;
-use veriskein_detectors::detect;
-use veriskein_graph::{AgentConfig, GraphState};
-use veriskein_normalizer::{Normalizer, SensitiveConfig, load_workspaces};
+use veriskein_detectors::DetectorEngine;
+use veriskein_graph::{AgentConfig, GraphState, LlmEndpointResolver};
+use veriskein_normalizer::{NormalizedData, Normalizer, SensitiveConfig, load_workspaces};
+use veriskein_state_net::StateNet;
 
 use crate::Cli;
 use crate::enrich::enrich_event_from_procfs;
+use crate::env::env_evidence_for_pid;
+use crate::metrics::MetricsTick;
 use crate::output::open_sink;
 use crate::preflight::preflight;
 
@@ -88,7 +91,15 @@ where
     }
     let workspaces = load_workspaces(&workspace_inputs)?;
     let mut normalizer = Normalizer::new(sensitive, workspaces);
-    let mut graph = GraphState::new(agent_config, normalizer.workspaces().to_vec())?;
+    let mut state_net = StateNet::new();
+    let mut graph = GraphState::new(agent_config.clone(), normalizer.workspaces().to_vec())?;
+    graph.refresh_endpoint_ips(LlmEndpointResolver::resolve(&agent_config.llm_endpoints));
+    for snapshot in normalizer.process_snapshots() {
+        let env_evidence = env_evidence_for_pid(snapshot.pid, &agent_config.env_hints);
+        graph.seed_from_snapshot(&snapshot, env_evidence);
+    }
+    let mut detectors = DetectorEngine::new();
+    let mut metrics = MetricsTick::new();
 
     info!("veriskein runtime started");
     info!("using config root {}", config_root.display());
@@ -104,8 +115,22 @@ where
                     for mut collected in events {
                         enrich_event_from_procfs(&mut collected.event);
                         for normalized in normalizer.apply(collected.ingest_seq, &collected.event) {
+                            state_net.apply(&normalized);
+                            if matches!(normalized.data, NormalizedData::ProcExec { .. }) {
+                                let env_evidence = env_evidence_for_pid(
+                                    normalized.process.pid,
+                                    &agent_config.env_hints,
+                                );
+                                graph.apply_env_evidence(
+                                    normalized.process.pid,
+                                    env_evidence,
+                                    normalized.ts_ns,
+                                );
+                            }
                             graph.apply(&normalized);
-                            for finding in detect(&normalized, &graph, cli.dry_run) {
+                            let findings = detectors.detect(&normalized, &graph, cli.dry_run);
+                            metrics.add_detector_fires(findings.len());
+                            for finding in findings {
                                 let alert = AlertRecord::from_finding(&finding);
                                 let value = alert.as_value()?;
                                 validate(&value).context("validate alert against schema")?;
@@ -114,6 +139,7 @@ where
                         }
                     }
                 }
+                metrics.maybe_log(collector.counters());
             }
         }
     }
@@ -132,10 +158,7 @@ mod tests {
     use serde_json::Value;
     use tempfile::NamedTempFile;
     use tokio::sync::oneshot;
-    use veriskein_proto::{
-        build_exec_event_bytes, build_file_open_event_bytes, build_file_unlink_event_bytes,
-        build_proc_fork_event_bytes,
-    };
+    use veriskein_proto::EventFixture;
 
     use super::{EventSource, Result, run_with_source_and_sink};
     use crate::Cli;
@@ -171,16 +194,7 @@ mod tests {
     const TEST_CHILD_PID: u32 = 900_101;
 
     fn seeded_exec_bytes() -> Vec<u8> {
-        build_exec_event_bytes(
-            0,
-            1,
-            TEST_ROOT_PID,
-            TEST_ROOT_PID,
-            1,
-            "claude",
-            "/usr/bin/claude",
-            &["claude"],
-        )
+        EventFixture::for_pid(1, TEST_ROOT_PID, 1, "claude").exec("/usr/bin/claude", &["claude"])
     }
 
     async fn drive_alerts(events: Vec<Vec<u8>>, dry_run: bool) -> Vec<Value> {
@@ -206,7 +220,7 @@ mod tests {
             )
             .await
         });
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
         let _ = shutdown_tx.send(());
         handle.await.expect("join").expect("driver ok");
 
@@ -234,26 +248,10 @@ mod tests {
         let values = drive_alerts(
             vec![
                 seeded_exec_bytes(),
-                build_proc_fork_event_bytes(
-                    0,
-                    2,
-                    TEST_ROOT_PID,
-                    TEST_ROOT_PID,
-                    1,
-                    "claude",
-                    TEST_CHILD_PID,
-                    TEST_CHILD_PID,
-                ),
-                build_exec_event_bytes(
-                    0,
-                    3,
-                    TEST_CHILD_PID,
-                    TEST_CHILD_PID,
-                    TEST_ROOT_PID,
-                    "sh",
-                    "/bin/sh",
-                    &["sh", "-lc", "echo"],
-                ),
+                EventFixture::for_pid(2, TEST_ROOT_PID, 1, "claude")
+                    .fork(TEST_CHILD_PID, TEST_CHILD_PID),
+                EventFixture::for_pid(3, TEST_CHILD_PID, TEST_ROOT_PID, "sh")
+                    .exec("/bin/sh", &["sh", "-lc", "echo"]),
             ],
             false,
         )
@@ -270,24 +268,8 @@ mod tests {
         let values = drive_alerts(
             vec![
                 seeded_exec_bytes(),
-                build_file_open_event_bytes(
-                    0,
-                    2,
-                    TEST_ROOT_PID,
-                    TEST_ROOT_PID,
-                    1,
-                    "claude",
-                    -100,
-                    3,
-                    "/etc/shadow",
-                ),
-                build_file_unlink_event_bytes(
-                    0,
-                    3,
-                    TEST_ROOT_PID,
-                    TEST_ROOT_PID,
-                    1,
-                    "claude",
+                EventFixture::for_pid(2, TEST_ROOT_PID, 1, "claude").open(-100, 3, "/etc/shadow"),
+                EventFixture::for_pid(3, TEST_ROOT_PID, 1, "claude").unlink(
                     -100,
                     0,
                     "/tmp/outside.txt",

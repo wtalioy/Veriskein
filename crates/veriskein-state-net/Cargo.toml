@@ -9,6 +9,12 @@ rust-version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+serde.workspace = true
+veriskein-normalizer = { path = "../veriskein-normalizer" }
+
+[dev-dependencies]
+veriskein-proto = { path = "../veriskein-proto" }
+
 [lints]
 workspace = true
-

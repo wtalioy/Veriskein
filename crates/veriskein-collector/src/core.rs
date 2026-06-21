@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde::Serialize;
 use veriskein_proto::{
-    DropReason, EventKind, EventRef, OwnedEvent, ParseError, build_meta_drop_event_bytes, parse,
+    DropReason, EventHeader, EventKind, EventRef, OwnedEvent, OwnedMetaDropEvent, ParseError,
+    defaults, parse,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -58,34 +59,16 @@ impl CollectorCore {
                 // explicit synthetic drop event instead of silent data loss.
                 self.counters.reorder_or_drop_total += 1;
                 let missing = seq - (last_seq + 1);
-                let drop_bytes = build_meta_drop_event_bytes(
-                    cpu,
-                    seq,
-                    last_seq + 1,
-                    seq,
-                    missing,
-                    DropReason::SeqGap,
-                );
-                let drop_event = parse(&drop_bytes)
-                    .expect("synthesized drop event must parse")
-                    .to_owned();
+                let drop_event =
+                    meta_drop_event(cpu, seq, last_seq + 1, seq, missing, DropReason::SeqGap);
                 out.push(self.wrap(drop_event));
             } else if seq <= last_seq {
                 // Replayed or stale events are surfaced the same way: preserve
                 // visibility into the ordering problem rather than pretending the
                 // stream was strictly monotonic.
                 self.counters.reorder_or_drop_total += 1;
-                let drop_bytes = build_meta_drop_event_bytes(
-                    cpu,
-                    seq,
-                    last_seq + 1,
-                    seq,
-                    0,
-                    DropReason::Reordered,
-                );
-                let drop_event = parse(&drop_bytes)
-                    .expect("synthesized reorder event must parse")
-                    .to_owned();
+                let drop_event =
+                    meta_drop_event(cpu, seq, last_seq + 1, seq, 0, DropReason::Reordered);
                 out.push(self.wrap(drop_event));
             }
         }
@@ -105,7 +88,40 @@ impl CollectorCore {
     }
 }
 
-pub fn is_exec_event(event: &CollectedEvent) -> bool {
-    matches!(&event.event, OwnedEvent::ProcExec(_))
-        && event.event.header().kind == EventKind::ProcExec as u16
+fn meta_drop_event(
+    cpu: u32,
+    seq: u64,
+    expected_seq: u64,
+    observed_seq: u64,
+    missing: u64,
+    reason: DropReason,
+) -> OwnedEvent {
+    OwnedEvent::MetaDrop(OwnedMetaDropEvent {
+        header: EventHeader {
+            ts_ns: 1_700_000_000_000_000_000 + seq,
+            abi_version: defaults::EVT_ABI_VERSION,
+            kind: EventKind::MetaDrop as u16,
+            total_len: core::mem::size_of::<veriskein_proto::MetaDropEvent>() as u16,
+            pid: 0,
+            tid: 0,
+            ppid: 0,
+            uid: 0,
+            gid: 0,
+            cgroup_id: 0,
+            cpu,
+            seq,
+            mount_ns: 0,
+            ret: 0,
+            _reserved: 0,
+            comm: {
+                let mut comm = [0; veriskein_proto::defaults::TASK_COMM_LEN];
+                comm[..4].copy_from_slice(b"meta");
+                comm
+            },
+        },
+        expected_seq,
+        observed_seq,
+        missing,
+        reason,
+    })
 }

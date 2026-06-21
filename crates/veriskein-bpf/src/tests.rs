@@ -83,3 +83,99 @@ fn smoke_test_observes_evt_net_connect() {
         "smoke test should observe EVT_NET_CONNECT",
     );
 }
+
+#[test]
+fn smoke_test_observes_evt_proc_fork() {
+    observe_event(
+        || {
+            let status = Command::new("/bin/sh")
+                .arg("-lc")
+                .arg("true")
+                .status()
+                .expect("shell should run");
+            assert!(status.success());
+        },
+        |event| matches!(event, EventRef::ProcFork(_)),
+        "smoke test should observe EVT_PROC_FORK",
+    );
+}
+
+#[test]
+fn smoke_test_observes_evt_proc_exit() {
+    observe_event(
+        || {
+            let status = Command::new("/bin/sh")
+                .arg("-lc")
+                .arg("true")
+                .status()
+                .expect("shell should run");
+            assert!(status.success());
+        },
+        |event| matches!(event, EventRef::ProcExit(_)),
+        "smoke test should observe EVT_PROC_EXIT",
+    );
+}
+
+#[test]
+fn smoke_test_observes_evt_proc_chdir() {
+    observe_event(
+        || {
+            let dir = std::env::temp_dir();
+            let status = Command::new("/bin/sh")
+                .current_dir(dir)
+                .arg("-lc")
+                .arg("pwd >/dev/null")
+                .status()
+                .expect("shell should run");
+            assert!(status.success());
+        },
+        |event| matches!(event, EventRef::ProcChdir(_)),
+        "smoke test should observe EVT_PROC_CHDIR",
+    );
+}
+
+#[test]
+fn smoke_test_observes_evt_fd_dup_or_close() {
+    observe_event(
+        || {
+            let status = Command::new("/bin/sh")
+                .arg("-lc")
+                .arg("exec 3</dev/null; exec 3<&-")
+                .status()
+                .expect("shell should run");
+            assert!(status.success());
+        },
+        |event| matches!(event, EventRef::FdDup(_)),
+        "smoke test should observe EVT_FD_DUP",
+    );
+}
+
+#[test]
+fn smoke_test_observes_evt_file_unlink() {
+    observe_event(
+        || {
+            let path = std::env::temp_dir()
+                .join(format!("veriskein-bpf-unlink-smoke-{}", std::process::id()));
+            std::fs::write(&path, b"demo").expect("write temp file");
+            std::fs::remove_file(&path).expect("unlink temp file");
+        },
+        |event| matches!(event, EventRef::FileUnlink(_)),
+        "smoke test should observe EVT_FILE_UNLINK",
+    );
+}
+
+#[test]
+fn smoke_test_observes_evt_file_rename() {
+    observe_event(
+        || {
+            let base = std::env::temp_dir();
+            let from = base.join(format!("veriskein-bpf-rename-from-{}", std::process::id()));
+            let to = base.join(format!("veriskein-bpf-rename-to-{}", std::process::id()));
+            std::fs::write(&from, b"demo").expect("write temp file");
+            std::fs::rename(&from, &to).expect("rename temp file");
+            let _ = std::fs::remove_file(&to);
+        },
+        |event| matches!(event, EventRef::FileRename(_)),
+        "smoke test should observe EVT_FILE_RENAME",
+    );
+}

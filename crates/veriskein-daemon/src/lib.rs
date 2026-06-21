@@ -2,6 +2,8 @@
 
 mod driver;
 mod enrich;
+mod env;
+mod metrics;
 mod output;
 mod preflight;
 

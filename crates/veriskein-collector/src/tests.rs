@@ -1,11 +1,11 @@
-use veriskein_proto::{DropReason, EventKind, OwnedEvent, build_exec_event_bytes};
+use veriskein_proto::{DropReason, EventFixture, EventKind, OwnedEvent};
 
 use crate::CollectorCore;
 
 #[test]
 fn emits_ordered_event_without_drop() {
     let mut collector = CollectorCore::new();
-    let raw = build_exec_event_bytes(0, 1, 100, 100, 1, "bash", "/bin/bash", &["bash"]);
+    let raw = EventFixture::for_pid(1, 100, 1, "bash").exec("/bin/bash", &["bash"]);
     let events = collector.process_bytes(&raw).expect("parse");
     assert_eq!(events.len(), 1);
     assert!(matches!(events[0].event, OwnedEvent::ProcExec(_)));
@@ -15,8 +15,8 @@ fn emits_ordered_event_without_drop() {
 #[test]
 fn synthesizes_gap_drop_event() {
     let mut collector = CollectorCore::new();
-    let first = build_exec_event_bytes(1, 1, 101, 101, 1, "a", "/bin/a", &["a"]);
-    let third = build_exec_event_bytes(1, 3, 103, 103, 1, "c", "/bin/c", &["c"]);
+    let first = EventFixture::new(1, 1, 101, 101, 1, "a").exec("/bin/a", &["a"]);
+    let third = EventFixture::new(1, 3, 103, 103, 1, "c").exec("/bin/c", &["c"]);
     collector.process_bytes(&first).expect("first");
     let events = collector.process_bytes(&third).expect("third");
     assert_eq!(events.len(), 2);
@@ -33,8 +33,8 @@ fn synthesizes_gap_drop_event() {
 #[test]
 fn synthesizes_reorder_event() {
     let mut collector = CollectorCore::new();
-    let second = build_exec_event_bytes(2, 2, 102, 102, 1, "b", "/bin/b", &["b"]);
-    let first = build_exec_event_bytes(2, 1, 101, 101, 1, "a", "/bin/a", &["a"]);
+    let second = EventFixture::new(2, 2, 102, 102, 1, "b").exec("/bin/b", &["b"]);
+    let first = EventFixture::new(2, 1, 101, 101, 1, "a").exec("/bin/a", &["a"]);
     collector.process_bytes(&second).expect("second");
     let events = collector.process_bytes(&first).expect("first");
     assert_eq!(events.len(), 2);

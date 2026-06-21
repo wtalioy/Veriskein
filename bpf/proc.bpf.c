@@ -48,24 +48,6 @@ struct fd_dup_event {
     __u32 _pad;
 } __attribute__((packed));
 
-struct sys_enter_args {
-    __u16 common_type;
-    __u8 common_flags;
-    __u8 common_preempt_count;
-    __s32 common_pid;
-    long id;
-    unsigned long args[6];
-};
-
-struct sys_exit_args {
-    __u16 common_type;
-    __u8 common_flags;
-    __u8 common_preempt_count;
-    __s32 common_pid;
-    long id;
-    long ret;
-};
-
 struct sched_process_exec_args {
     __u16 common_type;
     __u8 common_flags;
@@ -76,8 +58,15 @@ struct sched_process_exec_args {
     __u32 old_pid;
 };
 
-struct clone_args_state {
-    __u64 clone_flags;
+struct sched_process_fork_args {
+    __u16 common_type;
+    __u8 common_flags;
+    __u8 common_preempt_count;
+    __s32 common_pid;
+    char parent_comm[TASK_COMM_LEN];
+    __u32 parent_pid;
+    char child_comm[TASK_COMM_LEN];
+    __u32 child_pid;
 };
 
 struct chdir_args_state {
@@ -93,24 +82,7 @@ struct dup_args_state {
     __s32 newfd;
 };
 
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 16 * 1024 * 1024);
-} events SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, __u64);
-} seqs SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
-    __type(key, __u32);
-    __type(value, struct clone_args_state);
-} clone_args SEC(".maps");
+VERISKEIN_EVENT_MAPS
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -202,39 +174,22 @@ int handle_sched_process_exit(void *ctx)
     return 0;
 }
 
-SEC("tracepoint/syscalls/sys_enter_clone")
-int handle_enter_clone(struct sys_enter_args *ctx)
+SEC("tracepoint/sched/sched_process_fork")
+int handle_sched_process_fork(struct sched_process_fork_args *ctx)
 {
-    __u32 tid = (__u32)bpf_get_current_pid_tgid();
-    struct clone_args_state args = {
-        .clone_flags = ctx->args[0],
-    };
-    bpf_map_update_elem(&clone_args, &tid, &args, BPF_ANY);
-    return 0;
-}
-
-SEC("tracepoint/syscalls/sys_exit_clone")
-int handle_exit_clone(struct sys_exit_args *ctx)
-{
-    __u32 tid = (__u32)bpf_get_current_pid_tgid();
-    struct clone_args_state *args = bpf_map_lookup_elem(&clone_args, &tid);
-    struct proc_fork_event *evt;
-    if (!args || ctx->ret <= 0) {
-        bpf_map_delete_elem(&clone_args, &tid);
-        return 0;
-    }
-    evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
+    struct proc_fork_event *evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
     if (!evt) {
-        bpf_map_delete_elem(&clone_args, &tid);
         return 0;
     }
     __builtin_memset(evt, 0, sizeof(*evt));
-    fill_header(&seqs, &evt->header, EVT_PROC_FORK, sizeof(*evt), (__s32)ctx->ret);
-    evt->child_pid = (__u32)ctx->ret;
-    evt->child_tid = (__u32)ctx->ret;
-    evt->clone_flags = args->clone_flags;
+    fill_header(&seqs, &evt->header, EVT_PROC_FORK, sizeof(*evt), 0);
+    evt->header.pid = ctx->parent_pid;
+    evt->header.tid = ctx->parent_pid;
+    __builtin_memcpy(&evt->header.comm, &ctx->parent_comm, sizeof(evt->header.comm));
+    evt->child_pid = ctx->child_pid;
+    evt->child_tid = ctx->child_pid;
+    evt->clone_flags = 0;
     bpf_ringbuf_submit(evt, 0);
-    bpf_map_delete_elem(&clone_args, &tid);
     return 0;
 }
 

@@ -31,7 +31,8 @@
         "exec_observed",
         "unexpected_shell",
         "sensitive_file_access",
-        "out_of_workspace_deletion"
+        "out_of_workspace_deletion",
+        "single_agent_deadloop"
       ]
     },
     "severity": { "enum": ["low", "medium", "high", "critical"] },
@@ -49,6 +50,8 @@
       "required": ["paths", "event_ids", "argv"],
       "properties": {
         "paths": { "type": "array", "items": { "type": "string" } },
+        "ips": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "ports": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 65535 }, "default": [] },
         "event_ids": { "type": "array", "items": { "type": "string" } },
         "argv": { "type": "array", "items": { "type": "string" } }
       }
@@ -67,6 +70,8 @@
           "event_id": { "type": "string", "minLength": 1 },
           "ingest_seq": { "type": "integer", "minimum": 0 },
           "path": { "type": ["string", "null"] },
+          "ip": { "type": ["string", "null"] },
+          "port": { "type": ["integer", "null"], "minimum": 0, "maximum": 65535 },
           "note": { "type": ["string", "null"] }
         }
       }

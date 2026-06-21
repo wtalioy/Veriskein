@@ -53,7 +53,7 @@ impl RuntimeEventSource {
                     builder
                         // Copy into owned bytes immediately because libbpf only
                         // lends ring buffer memory for the callback duration.
-                        .add(&*events_map, move |data| match sender.send(data.to_vec()) {
+                        .add(events_map, move |data| match sender.send(data.to_vec()) {
                             Ok(()) => 0,
                             Err(_) => -libc::ECANCELED,
                         })

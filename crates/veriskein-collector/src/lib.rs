@@ -5,4 +5,4 @@ mod core;
 #[cfg(test)]
 mod tests;
 
-pub use core::{CollectedEvent, CollectorCore, CollectorCounters, is_exec_event};
+pub use core::{CollectedEvent, CollectorCore, CollectorCounters};

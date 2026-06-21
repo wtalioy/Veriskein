@@ -9,9 +9,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
-tracing.workspace = true
 veriskein-proto = { path = "../veriskein-proto" }
 
 [lints]
 workspace = true
-

@@ -73,10 +73,9 @@ impl GlobList {
         let matchers = globs
             .iter()
             .map(|glob| {
-                Glob::new(glob)
+                Ok(Glob::new(glob)
                     .with_context(|| format!("compile glob {}", glob))?
-                    .compile_matcher()
-                    .pipe(Ok)
+                    .compile_matcher())
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { globs, matchers })
@@ -91,14 +90,6 @@ impl GlobList {
         &self.globs
     }
 }
-
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-
-impl<T> Pipe for T {}
 
 pub fn load_workspaces(workspaces: &[PathBuf]) -> Result<Vec<WorkspaceRef>> {
     workspaces

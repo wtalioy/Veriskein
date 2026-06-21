@@ -43,6 +43,8 @@ pub fn sample_alert_value() -> Value {
         "reason_code": "shell_exec_unapproved",
         "objects": {
             "paths": ["/bin/sh"],
+            "ips": [],
+            "ports": [],
             "event_ids": ["f00d"],
             "argv": ["sh", "-lc", "true"]
         },
@@ -51,6 +53,8 @@ pub fn sample_alert_value() -> Value {
             "event_id": "f00d",
             "ingest_seq": 1,
             "path": "/bin/sh",
+            "ip": null,
+            "port": null,
             "note": null
         }],
         "fallback": {

@@ -4,285 +4,207 @@ use crate::{
     ProcForkEvent, defaults,
 };
 
-pub fn build_proc_fork_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    child_pid: u32,
-    child_tid: u32,
-) -> Vec<u8> {
-    let event = ProcForkEvent {
-        header: base_header(cpu, seq, EventKind::ProcFork, pid, tid, ppid, comm, 0),
-        child_pid,
-        child_tid,
-        clone_flags: 0,
-        _pad: 0,
-    };
-    as_vec(&event)
+#[derive(Debug, Clone)]
+pub struct EventFixture {
+    pub cpu: u32,
+    pub seq: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub ppid: u32,
+    pub comm: String,
 }
 
-pub fn build_exec_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    filename: &str,
-    argv: &[&str],
-) -> Vec<u8> {
-    let mut event = ProcExecEvent {
-        header: base_header(cpu, seq, EventKind::ProcExec, pid, tid, ppid, comm, 0),
-        argv_len: joined_arg_len(argv) as u32,
-        filename_len: filename.len() as u32,
-        filename: [0; defaults::PATH_INLINE_MAX],
-        argv: [0; defaults::ARGV_INLINE_MAX],
-    };
-    write_c_bytes(&mut event.filename, filename.as_bytes());
-    write_arg_bytes(&mut event.argv, argv);
-    as_vec(&event)
-}
-
-pub fn build_proc_exit_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    exit_code: i32,
-) -> Vec<u8> {
-    let event = ProcExitEvent {
-        header: base_header(
+impl EventFixture {
+    pub fn new(cpu: u32, seq: u64, pid: u32, tid: u32, ppid: u32, comm: impl Into<String>) -> Self {
+        Self {
             cpu,
             seq,
-            EventKind::ProcExit,
             pid,
             tid,
             ppid,
-            comm,
+            comm: comm.into(),
+        }
+    }
+
+    pub fn for_pid(seq: u64, pid: u32, ppid: u32, comm: impl Into<String>) -> Self {
+        Self::new(0, seq, pid, pid, ppid, comm)
+    }
+
+    pub fn with_seq(&self, seq: u64) -> Self {
+        Self {
+            seq,
+            ..self.clone()
+        }
+    }
+
+    pub fn exec(&self, filename: &str, argv: &[&str]) -> Vec<u8> {
+        let mut event = ProcExecEvent {
+            header: self.header(EventKind::ProcExec, 0),
+            argv_len: joined_arg_len(argv) as u32,
+            filename_len: filename.len() as u32,
+            filename: [0; defaults::PATH_INLINE_MAX],
+            argv: [0; defaults::ARGV_INLINE_MAX],
+        };
+        write_c_bytes(&mut event.filename, filename.as_bytes());
+        write_arg_bytes(&mut event.argv, argv);
+        as_vec(&event)
+    }
+
+    pub fn fork(&self, child_pid: u32, child_tid: u32) -> Vec<u8> {
+        let event = ProcForkEvent {
+            header: self.header(EventKind::ProcFork, 0),
+            child_pid,
+            child_tid,
+            clone_flags: 0,
+            _pad: 0,
+        };
+        as_vec(&event)
+    }
+
+    pub fn exit(&self, exit_code: i32) -> Vec<u8> {
+        let event = ProcExitEvent {
+            header: self.header(EventKind::ProcExit, exit_code),
             exit_code,
-        ),
-        exit_code,
-        _pad: 0,
-    };
-    as_vec(&event)
-}
+            _pad: 0,
+        };
+        as_vec(&event)
+    }
 
-pub fn build_proc_chdir_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    path: &str,
-) -> Vec<u8> {
-    let mut event = ProcChdirEvent {
-        header: base_header(cpu, seq, EventKind::ProcChdir, pid, tid, ppid, comm, 0),
-        dirfd: -100,
-        _pad: 0,
-        path_len: path.len() as u32,
-        path: [0; defaults::PATH_INLINE_MAX],
-    };
-    write_c_bytes(&mut event.path, path.as_bytes());
-    as_vec(&event)
-}
+    pub fn chdir(&self, path: &str) -> Vec<u8> {
+        let mut event = ProcChdirEvent {
+            header: self.header(EventKind::ProcChdir, 0),
+            dirfd: -100,
+            _pad: 0,
+            path_len: path.len() as u32,
+            path: [0; defaults::PATH_INLINE_MAX],
+        };
+        write_c_bytes(&mut event.path, path.as_bytes());
+        as_vec(&event)
+    }
 
-pub fn build_fd_dup_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    oldfd: i32,
-    newfd: i32,
-    dup_ret: i32,
-) -> Vec<u8> {
-    let event = FdDupEvent {
-        header: base_header(cpu, seq, EventKind::FdDup, pid, tid, ppid, comm, dup_ret),
-        oldfd,
-        newfd,
-        dup_ret,
-        _pad: 0,
-    };
-    as_vec(&event)
-}
+    pub fn dup(&self, oldfd: i32, newfd: i32, dup_ret: i32) -> Vec<u8> {
+        let event = FdDupEvent {
+            header: self.header(EventKind::FdDup, dup_ret),
+            oldfd,
+            newfd,
+            dup_ret,
+            _pad: 0,
+        };
+        as_vec(&event)
+    }
 
-pub fn build_file_open_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    dirfd: i32,
-    ret_fd: i32,
-    path: &str,
-) -> Vec<u8> {
-    let mut event = FileOpenEvent {
-        header: base_header(cpu, seq, EventKind::FileOpen, pid, tid, ppid, comm, ret_fd),
-        dirfd,
-        ret_fd,
-        flags: 0,
-        mode: 0,
-        inode: 1,
-        dev: 1,
-        path_len: path.len() as u32,
-        path: [0; defaults::PATH_INLINE_MAX],
-    };
-    write_c_bytes(&mut event.path, path.as_bytes());
-    as_vec(&event)
-}
+    pub fn open(&self, dirfd: i32, ret_fd: i32, path: &str) -> Vec<u8> {
+        self.open_with_flags(dirfd, ret_fd, path, 0)
+    }
 
-pub fn build_file_unlink_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    dirfd: i32,
-    unlink_ret: i32,
-    path: &str,
-) -> Vec<u8> {
-    let mut event = FileUnlinkEvent {
-        header: base_header(
-            cpu,
-            seq,
-            EventKind::FileUnlink,
-            pid,
-            tid,
-            ppid,
-            comm,
+    pub fn open_with_flags(&self, dirfd: i32, ret_fd: i32, path: &str, flags: u32) -> Vec<u8> {
+        let mut event = FileOpenEvent {
+            header: self.header(EventKind::FileOpen, ret_fd),
+            dirfd,
+            ret_fd,
+            flags,
+            mode: 0,
+            inode: 1,
+            dev: 1,
+            path_len: path.len() as u32,
+            path: [0; defaults::PATH_INLINE_MAX],
+        };
+        write_c_bytes(&mut event.path, path.as_bytes());
+        as_vec(&event)
+    }
+
+    pub fn unlink(&self, dirfd: i32, unlink_ret: i32, path: &str) -> Vec<u8> {
+        let mut event = FileUnlinkEvent {
+            header: self.header(EventKind::FileUnlink, unlink_ret),
+            dirfd,
             unlink_ret,
-        ),
-        dirfd,
-        unlink_ret,
-        flags: 0,
-        path_len: path.len() as u32,
-        path: [0; defaults::PATH_INLINE_MAX],
-    };
-    write_c_bytes(&mut event.path, path.as_bytes());
-    as_vec(&event)
-}
+            flags: 0,
+            path_len: path.len() as u32,
+            path: [0; defaults::PATH_INLINE_MAX],
+        };
+        write_c_bytes(&mut event.path, path.as_bytes());
+        as_vec(&event)
+    }
 
-pub fn build_file_rename_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    olddirfd: i32,
-    newdirfd: i32,
-    rename_ret: i32,
-    old_path: &str,
-    new_path: &str,
-) -> Vec<u8> {
-    let mut event = FileRenameEvent {
-        header: base_header(
-            cpu,
-            seq,
-            EventKind::FileRename,
-            pid,
-            tid,
-            ppid,
-            comm,
+    pub fn rename(
+        &self,
+        olddirfd: i32,
+        newdirfd: i32,
+        rename_ret: i32,
+        old_path: &str,
+        new_path: &str,
+    ) -> Vec<u8> {
+        let mut event = FileRenameEvent {
+            header: self.header(EventKind::FileRename, rename_ret),
+            olddirfd,
+            newdirfd,
             rename_ret,
-        ),
-        olddirfd,
-        newdirfd,
-        rename_ret,
-        flags: 0,
-        oldpath_len: old_path.len() as u32,
-        newpath_len: new_path.len() as u32,
-        paths: [0; defaults::PATH_INLINE_MAX * 2],
-    };
-    write_path_pair(&mut event.paths, old_path, new_path);
-    as_vec(&event)
-}
+            flags: 0,
+            oldpath_len: old_path.len() as u32,
+            newpath_len: new_path.len() as u32,
+            paths: [0; defaults::PATH_INLINE_MAX * 2],
+        };
+        write_path_pair(&mut event.paths, old_path, new_path);
+        as_vec(&event)
+    }
 
-pub fn build_net_connect_event_bytes(
-    cpu: u32,
-    seq: u64,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    sockfd: i32,
-    dport: u16,
-    tls_candidate: bool,
-) -> Vec<u8> {
-    let event = NetConnectEvent {
-        header: base_header(cpu, seq, EventKind::NetConnect, pid, tid, ppid, comm, 0),
-        sockfd,
-        connect_ret: 0,
-        family: 2,
-        dport_be: dport.to_be(),
-        sport_be: 0,
-        tls_candidate: u8::from(tls_candidate),
-        _pad0: 0,
-        _pad1: 0,
-        addr_dst: [0; 16],
-        addr_src: [0; 16],
-    };
-    as_vec(&event)
-}
+    pub fn connect(&self, sockfd: i32, dport: u16, tls_candidate: bool) -> Vec<u8> {
+        let event = NetConnectEvent {
+            header: self.header(EventKind::NetConnect, 0),
+            sockfd,
+            connect_ret: 0,
+            family: 2,
+            dport_be: dport.to_be(),
+            sport_be: 0,
+            tls_candidate: u8::from(tls_candidate),
+            _pad0: 0,
+            _pad1: 0,
+            addr_dst: [0; 16],
+            addr_src: [0; 16],
+        };
+        as_vec(&event)
+    }
 
-pub fn build_meta_drop_event_bytes(
-    cpu: u32,
-    seq: u64,
-    expected_seq: u64,
-    observed_seq: u64,
-    missing: u64,
-    reason: DropReason,
-) -> Vec<u8> {
-    let event = MetaDropEvent {
-        header: base_header(cpu, seq, EventKind::MetaDrop, 0, 0, 0, "meta", 0),
-        expected_seq,
-        observed_seq,
-        missing,
-        reason: reason as u8,
-        _reserved: [0; 7],
-    };
-    as_vec(&event)
-}
+    pub fn meta_drop(
+        &self,
+        expected_seq: u64,
+        observed_seq: u64,
+        missing: u64,
+        reason: DropReason,
+    ) -> Vec<u8> {
+        let event = MetaDropEvent {
+            header: self.header(EventKind::MetaDrop, 0),
+            expected_seq,
+            observed_seq,
+            missing,
+            reason: reason as u8,
+            _reserved: [0; 7],
+        };
+        as_vec(&event)
+    }
 
-fn base_header(
-    cpu: u32,
-    seq: u64,
-    kind: EventKind,
-    pid: u32,
-    tid: u32,
-    ppid: u32,
-    comm: &str,
-    ret: i32,
-) -> EventHeader {
-    let mut header = EventHeader {
-        ts_ns: 1_700_000_000_000_000_000 + seq,
-        abi_version: defaults::EVT_ABI_VERSION,
-        kind: kind as u16,
-        total_len: 0,
-        pid,
-        tid,
-        ppid,
-        uid: 1000,
-        gid: 1000,
-        cgroup_id: 0,
-        cpu,
-        seq,
-        mount_ns: 42,
-        ret,
-        _reserved: 0,
-        comm: [0; defaults::TASK_COMM_LEN],
-    };
-    write_c_bytes(&mut header.comm, comm.as_bytes());
-    header
+    fn header(&self, kind: EventKind, ret: i32) -> EventHeader {
+        let mut header = EventHeader {
+            ts_ns: 1_700_000_000_000_000_000 + self.seq,
+            abi_version: defaults::EVT_ABI_VERSION,
+            kind: kind as u16,
+            total_len: 0,
+            pid: self.pid,
+            tid: self.tid,
+            ppid: self.ppid,
+            uid: 1000,
+            gid: 1000,
+            cgroup_id: 0,
+            cpu: self.cpu,
+            seq: self.seq,
+            mount_ns: 42,
+            ret,
+            _reserved: 0,
+            comm: [0; defaults::TASK_COMM_LEN],
+        };
+        write_c_bytes(&mut header.comm, self.comm.as_bytes());
+        header
+    }
 }
 
 fn as_vec<T: plain::Plain>(event: &T) -> Vec<u8> {

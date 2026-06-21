@@ -29,6 +29,37 @@ struct event_header {
     char comm[TASK_COMM_LEN];
 } __attribute__((packed));
 
+struct sys_enter_args {
+    __u16 common_type;
+    __u8 common_flags;
+    __u8 common_preempt_count;
+    __s32 common_pid;
+    long id;
+    unsigned long args[6];
+};
+
+struct sys_exit_args {
+    __u16 common_type;
+    __u8 common_flags;
+    __u8 common_preempt_count;
+    __s32 common_pid;
+    long id;
+    long ret;
+};
+
+#define VERISKEIN_EVENT_MAPS                                                   \
+    struct {                                                                   \
+        __uint(type, BPF_MAP_TYPE_RINGBUF);                                    \
+        __uint(max_entries, 16 * 1024 * 1024);                                 \
+    } events SEC(".maps");                                                    \
+                                                                               \
+    struct {                                                                   \
+        __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);                               \
+        __uint(max_entries, 1);                                                \
+        __type(key, __u32);                                                    \
+        __type(value, __u64);                                                  \
+    } seqs SEC(".maps");
+
 struct task_struct___local {
     struct task_struct___local *real_parent;
     __u32 tgid;

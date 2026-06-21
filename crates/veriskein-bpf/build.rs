@@ -17,6 +17,10 @@ fn main() -> Result<()> {
         "cargo:rerun-if-changed={}",
         repo_root.join("bpf/vmlinux.h").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo_root.join("bpf/common.h").display()
+    );
 
     for stem in ["proc", "fs", "net"] {
         let source = repo_root.join(format!("bpf/{stem}.bpf.c"));

@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
-use veriskein_detectors::{Finding, FindingType, VisibilityState};
+use veriskein_detectors::{Finding, FindingEvidence, FindingObjects, FindingType};
 use veriskein_proto::defaults;
 
 #[derive(Debug, Clone, Serialize)]
@@ -12,12 +12,16 @@ pub struct AlertEvidence {
     pub event_id: String,
     pub ingest_seq: u64,
     pub path: Option<String>,
+    pub ip: Option<String>,
+    pub port: Option<u16>,
     pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertObjects {
     pub paths: Vec<String>,
+    pub ips: Vec<String>,
+    pub ports: Vec<u16>,
     pub event_ids: Vec<String>,
     pub argv: Vec<String>,
 }
@@ -59,12 +63,7 @@ pub struct AlertRecord {
 impl AlertRecord {
     pub fn from_finding(finding: &Finding) -> Self {
         let (severity, confidence_band, confidence_score) = policy_for(finding.finding_type);
-        let visibility = match finding.health.visibility_state {
-            VisibilityState::Full => "full",
-            VisibilityState::Partial => "partial",
-            VisibilityState::Unsupported => "unsupported",
-            VisibilityState::Unavailable => "unavailable",
-        };
+        let visibility = finding.health.visibility_state.as_str();
         let alert_type = finding.finding_type.as_str().to_string();
         // Alert ids intentionally derive from the finding shape instead of the
         // raw event id so duplicate detector outputs can collapse downstream.
@@ -92,22 +91,8 @@ impl AlertRecord {
             agent_id: finding.agent_id.clone(),
             summary: finding.summary.clone(),
             reason_code: finding.reason_code.to_string(),
-            objects: AlertObjects {
-                paths: finding.objects.paths.clone(),
-                event_ids: finding.objects.event_ids.clone(),
-                argv: finding.objects.argv.clone(),
-            },
-            evidence: finding
-                .evidence
-                .iter()
-                .map(|evidence| AlertEvidence {
-                    kind: evidence.kind.to_string(),
-                    event_id: evidence.event_id.clone(),
-                    ingest_seq: evidence.ingest_seq,
-                    path: evidence.path.clone(),
-                    note: evidence.note.clone(),
-                })
-                .collect(),
+            objects: AlertObjects::from(&finding.objects),
+            evidence: finding.evidence.iter().map(AlertEvidence::from).collect(),
             fallback: AlertFallback {
                 mode: "none",
                 visibility,
@@ -124,6 +109,32 @@ impl AlertRecord {
     }
 }
 
+impl From<&FindingObjects> for AlertObjects {
+    fn from(objects: &FindingObjects) -> Self {
+        Self {
+            paths: objects.paths.clone(),
+            ips: objects.ips.clone(),
+            ports: objects.ports.clone(),
+            event_ids: objects.event_ids.clone(),
+            argv: objects.argv.clone(),
+        }
+    }
+}
+
+impl From<&FindingEvidence> for AlertEvidence {
+    fn from(evidence: &FindingEvidence) -> Self {
+        Self {
+            kind: evidence.kind.to_string(),
+            event_id: evidence.event_id.clone(),
+            ingest_seq: evidence.ingest_seq,
+            path: evidence.path.clone(),
+            ip: evidence.ip.clone(),
+            port: evidence.port,
+            note: evidence.note.clone(),
+        }
+    }
+}
+
 fn policy_for(finding_type: FindingType) -> (&'static str, &'static str, f32) {
     // The current detector set uses fixed policy metadata so schema consumers
     // can rely on stable severity bands before richer scoring lands.
@@ -131,6 +142,7 @@ fn policy_for(finding_type: FindingType) -> (&'static str, &'static str, f32) {
         FindingType::UnexpectedShell => ("high", "medium", 0.62),
         FindingType::SensitiveFileAccess => ("high", "medium", 0.68),
         FindingType::OutOfWorkspaceDeletion => ("high", "medium", 0.66),
+        FindingType::SingleAgentDeadloop => ("medium", "medium", 0.62),
         FindingType::ExecObserved => ("low", "strong", 1.0),
     }
 }

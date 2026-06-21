@@ -13,6 +13,15 @@ binary_seeds = [
   "codex"
 ]
 
+env_hints = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"]
+argv_hints = ["--model", "--api-key", "agent-mode"]
+llm_endpoints = [
+  "api.anthropic.com",
+  "api.openai.com",
+  "generativelanguage.googleapis.com",
+  "api.deepseek.com"
+]
+
 shell_allowlist = []
 sensitive_allowlist = []
 # Runtime scratch locations like `/dev/shm` are appended in code; this file is
