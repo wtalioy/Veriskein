@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use veriskein_normalizer::{
-    GlobList, NormalizedData, NormalizedEvent, ProcessSnapshot, WorkspaceRef,
+    GlobList, NormalizedData, NormalizedEvent, ProcessSnapshot, WorkspaceRef, path_basename,
 };
 use veriskein_proto::{AgentId, AttributionStrength, Role, RoleTag, SessionId, defaults};
 
@@ -294,7 +294,7 @@ impl GraphState {
         if self.is_seed_binary(filename) {
             evidence.push(RootEvidence {
                 kind: RootEvidenceKind::BinarySeed,
-                value: basename(filename).to_string(),
+                value: path_basename(filename).to_string(),
                 ts_ns: event.ts_ns,
             });
         }
@@ -471,7 +471,7 @@ impl GraphState {
     }
 
     fn is_seed_binary(&self, filename: &str) -> bool {
-        let basename = basename(filename);
+        let basename = path_basename(filename);
         self.config.binary_seeds.iter().any(|seed| seed == basename)
     }
 
@@ -508,13 +508,6 @@ impl GraphState {
         }
         self.workspaces.first().cloned()
     }
-}
-
-pub(super) fn basename(path: &str) -> &str {
-    Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(path)
 }
 
 fn has_binary_seed(evidence: &[RootEvidence]) -> bool {

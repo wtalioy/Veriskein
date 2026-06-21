@@ -2,19 +2,20 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use veriskein_normalizer::{NormalizedData, NormalizedEvent};
+use veriskein_proto::{FdDupEffect, VisibilityState, fd_dup_effect};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FdIdentitySnapshot {
-    pub pid: u32,
-    pub fd: i32,
-    pub fd_version: u32,
-    pub kind: FdIdentityKind,
-    pub path: Option<String>,
-    pub endpoint: Option<EndpointAddr>,
+pub(crate) struct FdIdentitySnapshot {
+    pub(crate) pid: u32,
+    pub(crate) fd: i32,
+    pub(crate) fd_version: u32,
+    pub(crate) kind: FdIdentityKind,
+    pub(crate) path: Option<String>,
+    pub(crate) endpoint: Option<EndpointAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum FdIdentityKind {
+pub(crate) enum FdIdentityKind {
     File,
     Socket,
     Unknown,
@@ -27,14 +28,21 @@ pub struct EndpointAddr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct EndpointSnapshot {
-    pub pid: u32,
-    pub sockfd: i32,
-    pub fd_version: u32,
-    pub dst: EndpointAddr,
-    pub tls_candidate: bool,
-    pub event_id: String,
-    pub ts_ns: u64,
+pub(crate) struct EndpointSnapshot {
+    pub(crate) pid: u32,
+    pub(crate) sockfd: i32,
+    pub(crate) fd_version: u32,
+    pub(crate) dst: EndpointAddr,
+    pub(crate) tls_candidate: bool,
+    pub(crate) event_id: String,
+    pub(crate) ts_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TlsAttributionSnapshot {
+    pub endpoint: Option<EndpointAddr>,
+    pub visibility_state: VisibilityState,
+    pub degradation_reason: Option<&'static str>,
 }
 
 impl FdIdentitySnapshot {
@@ -118,7 +126,7 @@ impl StateNet {
                         event.process.pid,
                         *ret_fd,
                         version,
-                        preferred_path(path),
+                        path.preferred_path_string(),
                     ),
                 );
             }
@@ -138,39 +146,66 @@ impl StateNet {
         }
     }
 
-    pub fn fd_snapshot(&self, pid: u32, fd: i32) -> Option<&FdIdentitySnapshot> {
+    #[cfg(test)]
+    pub(crate) fn fd_snapshot(&self, pid: u32, fd: i32) -> Option<&FdIdentitySnapshot> {
         self.fds.get(&(pid, fd))
     }
 
-    pub fn endpoint_snapshots(&self) -> &[EndpointSnapshot] {
+    #[cfg(test)]
+    pub(crate) fn endpoint_snapshots(&self) -> &[EndpointSnapshot] {
         &self.endpoints
     }
 
+    pub fn record_tls_fragment(
+        &self,
+        pid: u32,
+        _ssl_ctx: u64,
+        ts_ns: u64,
+    ) -> TlsAttributionSnapshot {
+        let mut candidates = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| {
+                endpoint.pid == pid && endpoint.tls_candidate && endpoint.ts_ns <= ts_ns
+            })
+            .rev();
+        let first = candidates.next();
+        let second = candidates.next();
+        match (first, second) {
+            (Some(endpoint), None) => TlsAttributionSnapshot {
+                endpoint: Some(endpoint.dst.clone()),
+                visibility_state: VisibilityState::Full,
+                degradation_reason: None,
+            },
+            (Some(endpoint), Some(_)) => TlsAttributionSnapshot {
+                endpoint: Some(endpoint.dst.clone()),
+                visibility_state: VisibilityState::Partial,
+                degradation_reason: Some("inferred_tls_endpoint"),
+            },
+            (None, _) => TlsAttributionSnapshot {
+                endpoint: None,
+                visibility_state: VisibilityState::Partial,
+                degradation_reason: Some("missing_tls_endpoint"),
+            },
+        }
+    }
+
     fn apply_fd_dup(&mut self, pid: u32, oldfd: i32, newfd: i32, dup_ret: i32) {
-        if oldfd == -1 {
-            if dup_ret == 0 {
-                self.close_fd(pid, newfd);
+        match fd_dup_effect(oldfd, newfd, dup_ret) {
+            FdDupEffect::Close { fd } => self.close_fd(pid, fd),
+            FdDupEffect::Duplicate { oldfd, newfd } => {
+                let version = self.bump_version(pid, newfd);
+                let mut snapshot = self
+                    .fds
+                    .get(&(pid, oldfd))
+                    .cloned()
+                    .unwrap_or_else(|| FdIdentitySnapshot::unknown(pid, newfd, version));
+                snapshot.fd = newfd;
+                snapshot.fd_version = version;
+                self.fds.insert((pid, newfd), snapshot);
             }
-            return;
+            FdDupEffect::Noop => {}
         }
-
-        if dup_ret < 0 {
-            if newfd >= 0 {
-                self.close_fd(pid, newfd);
-            }
-            return;
-        }
-
-        let destination = if newfd >= 0 { newfd } else { dup_ret };
-        let version = self.bump_version(pid, destination);
-        let mut snapshot = self
-            .fds
-            .get(&(pid, oldfd))
-            .cloned()
-            .unwrap_or_else(|| FdIdentitySnapshot::unknown(pid, destination, version));
-        snapshot.fd = destination;
-        snapshot.fd_version = version;
-        self.fds.insert((pid, destination), snapshot);
     }
 
     fn apply_connect(
@@ -214,13 +249,4 @@ impl StateNet {
     fn current_or_first_version(&mut self, pid: u32, fd: i32) -> u32 {
         *self.versions.entry((pid, fd)).or_insert(1)
     }
-}
-
-fn preferred_path(path: &veriskein_normalizer::PathContext) -> String {
-    path.resolution
-        .canonical
-        .as_ref()
-        .unwrap_or(&path.resolution.lexical)
-        .display()
-        .to_string()
 }

@@ -4,4 +4,4 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub use state::{EndpointAddr, EndpointSnapshot, FdIdentityKind, FdIdentitySnapshot, StateNet};
+pub use state::{EndpointAddr, StateNet, TlsAttributionSnapshot};

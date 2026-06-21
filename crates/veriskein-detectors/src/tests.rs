@@ -5,7 +5,9 @@ use veriskein_normalizer::{
 };
 use veriskein_proto::EventKind;
 
-use crate::{DetectorEngine, FindingType, detect};
+use veriskein_correlator::{PromptEvidence, PromptEvidenceKind};
+
+use crate::{DetectorEngine, FindingType};
 
 const TEST_PID: u32 = 10;
 
@@ -85,6 +87,14 @@ fn event(
     }
 }
 
+fn detect_once(
+    event: &NormalizedEvent,
+    graph: &GraphState,
+    dry_run_exec_observed: bool,
+) -> Vec<crate::Finding> {
+    DetectorEngine::new().detect(event, graph, dry_run_exec_observed)
+}
+
 fn net_connect_event(seq: u64, pid: u32, ip: &str, port: u16) -> NormalizedEvent {
     NormalizedEvent {
         ingest_seq: seq,
@@ -149,7 +159,7 @@ fn sensitive_file_open_event(seq: u64, pid: u32, path: &str) -> NormalizedEvent 
 
 #[test]
 fn unexpected_shell_fires() {
-    let findings = detect(
+    let findings = detect_once(
         &event(
             EventKind::ProcExec,
             "shell",
@@ -167,7 +177,7 @@ fn unexpected_shell_fires() {
 
 #[test]
 fn sensitive_access_fires() {
-    let findings = detect(
+    let findings = detect_once(
         &event(
             EventKind::FileOpen,
             "open",
@@ -186,7 +196,7 @@ fn sensitive_access_fires() {
 
 #[test]
 fn denied_sensitive_access_still_fires() {
-    let findings = detect(
+    let findings = detect_once(
         &event(
             EventKind::FileOpen,
             "open-denied",
@@ -224,7 +234,7 @@ fn benign_shell_negative_when_not_in_session() {
     )
     .expect("graph");
     assert!(
-        detect(
+        detect_once(
             &event(
                 EventKind::ProcExec,
                 "shell",
@@ -270,7 +280,7 @@ fn delete_allowlist_uses_glob() {
         },
     ));
     assert!(
-        detect(
+        detect_once(
             &event(
                 EventKind::FileUnlink,
                 "unlink",
@@ -290,7 +300,7 @@ fn delete_allowlist_uses_glob() {
 #[test]
 fn failed_unlink_does_not_alert() {
     assert!(
-        detect(
+        detect_once(
             &event(
                 EventKind::FileUnlink,
                 "unlink-fail",
@@ -310,7 +320,7 @@ fn failed_unlink_does_not_alert() {
 #[test]
 fn failed_rename_does_not_alert() {
     assert!(
-        detect(
+        detect_once(
             &event(
                 EventKind::FileRename,
                 "rename-fail",
@@ -330,7 +340,7 @@ fn failed_rename_does_not_alert() {
 
 #[test]
 fn successful_outside_workspace_delete_alerts() {
-    let findings = detect(
+    let findings = detect_once(
         &event(
             EventKind::FileUnlink,
             "unlink-ok",
@@ -539,5 +549,70 @@ fn deadloop_progress_signals_expire_with_window() {
         findings
             .iter()
             .any(|finding| finding.finding_type == FindingType::SingleAgentDeadloop)
+    );
+}
+
+#[test]
+fn prompt_repeat_can_enhance_deadloop_without_file_repeat() {
+    let graph = graph();
+    let mut engine = DetectorEngine::new();
+    let repeated = vec![PromptEvidence {
+        prompt_id: "prompt-1".to_string(),
+        ingest_seq: 1,
+        visibility_state: veriskein_proto::VisibilityState::Full,
+        kind: PromptEvidenceKind::RepeatedPrompt { count: 5 },
+    }];
+    let mut findings = Vec::new();
+
+    for seq in 1..=60 {
+        findings.extend(engine.detect_with_prompt_evidence(
+            &net_connect_event(seq, TEST_PID, "127.0.0.1", 443),
+            &graph,
+            false,
+            &repeated,
+        ));
+    }
+
+    let deadloop = findings
+        .iter()
+        .find(|finding| finding.finding_type == FindingType::SingleAgentDeadloop)
+        .expect("deadloop should fire");
+    assert_eq!(deadloop.component_scores.get("prompt_repeat"), Some(&5.0));
+    assert!(
+        deadloop
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "prompt_ref"
+                && evidence.note.as_deref() == Some("repeated_prompt_count=5"))
+    );
+}
+
+#[test]
+fn repeated_prompt_signal_does_not_attach_to_base_findings() {
+    let graph = graph();
+    let mut engine = DetectorEngine::new();
+    let repeated = vec![PromptEvidence {
+        prompt_id: "prompt-1".to_string(),
+        ingest_seq: 1,
+        visibility_state: veriskein_proto::VisibilityState::Full,
+        kind: PromptEvidenceKind::RepeatedPrompt { count: 5 },
+    }];
+
+    let findings = engine.detect_with_prompt_evidence(
+        &sensitive_file_open_event(1, TEST_PID, "/etc/shadow"),
+        &graph,
+        false,
+        &repeated,
+    );
+
+    let sensitive = findings
+        .iter()
+        .find(|finding| finding.finding_type == FindingType::SensitiveFileAccess)
+        .expect("sensitive finding");
+    assert!(
+        sensitive
+            .evidence
+            .iter()
+            .all(|evidence| evidence.kind != "prompt_ref")
     );
 }

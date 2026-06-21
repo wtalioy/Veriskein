@@ -117,6 +117,18 @@ plain_struct!(NetConnectEvent {
     addr_src: [u8; 16]
 });
 
+plain_struct!(ContentFragEvent {
+    ssl_ctx: u64,
+    stream_offset: u64,
+    byte_len: u32,
+    frag_len: u32,
+    channel: u8,
+    direction: u8,
+    flags: u16,
+    _reserved: u32,
+    data: [u8; defaults::CONTENT_INLINE_MAX]
+});
+
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MetaDropEvent {

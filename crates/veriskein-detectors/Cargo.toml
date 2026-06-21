@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde.workspace = true
+veriskein-correlator = { path = "../veriskein-correlator" }
 veriskein-graph = { path = "../veriskein-graph" }
 veriskein-normalizer = { path = "../veriskein-normalizer" }
 veriskein-proto = { path = "../veriskein-proto" }

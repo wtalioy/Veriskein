@@ -43,11 +43,8 @@ pub(crate) struct SessionProgressSignal {
 
 pub(crate) fn materialize_signals(
     event: &NormalizedEvent,
-    binding: Option<&Attribution>,
+    binding: &Attribution,
 ) -> Vec<DetectorSignal> {
-    let Some(binding) = binding.filter(|binding| binding.is_confirmed()) else {
-        return Vec::new();
-    };
     match &event.data {
         NormalizedData::FileOpen {
             path,
@@ -59,7 +56,7 @@ pub(crate) fn materialize_signals(
         {
             vec![DetectorSignal::OutOfWorkspaceMutation(
                 OutOfWorkspaceMutation {
-                    path: preferred_path(path),
+                    path: path.preferred_path_string(),
                     reason_code: "unlink_outside_workspace",
                     note: note_for_path(path),
                 },
@@ -72,7 +69,7 @@ pub(crate) fn materialize_signals(
         } if *rename_ret == 0 && new_path.workspace.is_none() => {
             vec![DetectorSignal::OutOfWorkspaceMutation(
                 OutOfWorkspaceMutation {
-                    path: preferred_path(new_path),
+                    path: new_path.preferred_path_string(),
                     reason_code: "rename_outside_workspace",
                     note: note_for_path(new_path),
                 },
@@ -90,15 +87,6 @@ pub(crate) fn materialize_signals(
     }
 }
 
-pub(crate) fn preferred_path(path: &PathContext) -> String {
-    path.resolution
-        .canonical
-        .as_ref()
-        .unwrap_or(&path.resolution.lexical)
-        .display()
-        .to_string()
-}
-
 fn file_open_signals(
     binding: &Attribution,
     path: &PathContext,
@@ -106,7 +94,7 @@ fn file_open_signals(
     flags: u32,
 ) -> Vec<DetectorSignal> {
     let mut out = Vec::new();
-    let chosen_path = preferred_path(path);
+    let chosen_path = path.preferred_path_string();
     if path.sensitive_rule.is_some() {
         out.push(DetectorSignal::SensitivePathHit(SensitivePathHit {
             path: chosen_path.clone(),

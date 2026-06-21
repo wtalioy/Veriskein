@@ -18,7 +18,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 veriskein-alert = { path = "../veriskein-alert" }
 veriskein-bpf = { path = "../veriskein-bpf" }
+veriskein-capture = { path = "../veriskein-capture" }
 veriskein-collector = { path = "../veriskein-collector" }
+veriskein-content = { path = "../veriskein-content" }
+veriskein-correlator = { path = "../veriskein-correlator" }
 veriskein-detectors = { path = "../veriskein-detectors" }
 veriskein-graph = { path = "../veriskein-graph" }
 veriskein-normalizer = { path = "../veriskein-normalizer" }

@@ -6,19 +6,12 @@ use anyhow::{Context, Result};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::oneshot;
 use tracing::info;
-use veriskein_alert::{AlertRecord, emit_ndjson_line, validate};
-use veriskein_bpf::RuntimeEventSource;
-use veriskein_collector::CollectorCore;
-use veriskein_detectors::DetectorEngine;
-use veriskein_graph::{AgentConfig, GraphState, LlmEndpointResolver};
-use veriskein_normalizer::{NormalizedData, Normalizer, SensitiveConfig, load_workspaces};
-use veriskein_state_net::StateNet;
+use veriskein_bpf::{CaptureControl, RuntimeEventSource};
 
 use crate::Cli;
-use crate::enrich::enrich_event_from_procfs;
-use crate::env::env_evidence_for_pid;
 use crate::metrics::MetricsTick;
 use crate::output::open_sink;
+use crate::pipeline::RuntimePipeline;
 use crate::preflight::preflight;
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -42,7 +35,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_config_root() -> Result<std::path::PathBuf> {
+pub(crate) fn resolve_config_root() -> Result<std::path::PathBuf> {
     if let Some(root) = std::env::var_os("VERISKEIN_CONFIG_ROOT") {
         return Ok(root.into());
     }
@@ -55,8 +48,11 @@ pub fn resolve_config_root() -> Result<std::path::PathBuf> {
         .map(|path| path.to_path_buf())
 }
 
-pub trait EventSource {
+trait EventSource {
     fn try_recv(&self) -> Result<Option<Vec<u8>>>;
+    fn capture_control(&self) -> Option<CaptureControl> {
+        None
+    }
     fn shutdown(&mut self) -> Result<()>;
 }
 
@@ -65,12 +61,16 @@ impl EventSource for RuntimeEventSource {
         RuntimeEventSource::try_recv(self)
     }
 
+    fn capture_control(&self) -> Option<CaptureControl> {
+        Some(RuntimeEventSource::capture_control(self))
+    }
+
     fn shutdown(&mut self) -> Result<()> {
         RuntimeEventSource::shutdown(self)
     }
 }
 
-pub async fn run_with_source_and_sink<S>(
+async fn run_with_source_and_sink<S>(
     mut source: S,
     mut sink: Box<dyn Write + Send>,
     cli: Cli,
@@ -80,25 +80,8 @@ pub async fn run_with_source_and_sink<S>(
 where
     S: EventSource + Send + 'static,
 {
-    let mut collector = CollectorCore::new();
-    let sensitive = SensitiveConfig::load(&config_root.join("config/sensitive.toml"))?;
-    let agent_config = AgentConfig::load(&config_root.join("config/agents.toml"))?;
-    let mut workspace_inputs = cli.workspaces.clone();
-    // The CLI wins when it is explicit, but unattended runs still need a
-    // stable default workspace from config so preflight and runtime agree.
-    if workspace_inputs.is_empty() && !agent_config.default_workspace.is_empty() {
-        workspace_inputs.push(agent_config.default_workspace.clone().into());
-    }
-    let workspaces = load_workspaces(&workspace_inputs)?;
-    let mut normalizer = Normalizer::new(sensitive, workspaces);
-    let mut state_net = StateNet::new();
-    let mut graph = GraphState::new(agent_config.clone(), normalizer.workspaces().to_vec())?;
-    graph.refresh_endpoint_ips(LlmEndpointResolver::resolve(&agent_config.llm_endpoints));
-    for snapshot in normalizer.process_snapshots() {
-        let env_evidence = env_evidence_for_pid(snapshot.pid, &agent_config.env_hints);
-        graph.seed_from_snapshot(&snapshot, env_evidence);
-    }
-    let mut detectors = DetectorEngine::new();
+    let mut pipeline =
+        RuntimePipeline::new(config_root, &cli.workspaces, source.capture_control())?;
     let mut metrics = MetricsTick::new();
 
     info!("veriskein runtime started");
@@ -111,35 +94,11 @@ where
                 // everything currently buffered before sleeping again so graph
                 // state and detector ordering stay aligned with ingest order.
                 while let Some(raw) = source.try_recv()? {
-                    let events = collector.process_bytes(&raw).context("process raw BPF event")?;
-                    for mut collected in events {
-                        enrich_event_from_procfs(&mut collected.event);
-                        for normalized in normalizer.apply(collected.ingest_seq, &collected.event) {
-                            state_net.apply(&normalized);
-                            if matches!(normalized.data, NormalizedData::ProcExec { .. }) {
-                                let env_evidence = env_evidence_for_pid(
-                                    normalized.process.pid,
-                                    &agent_config.env_hints,
-                                );
-                                graph.apply_env_evidence(
-                                    normalized.process.pid,
-                                    env_evidence,
-                                    normalized.ts_ns,
-                                );
-                            }
-                            graph.apply(&normalized);
-                            let findings = detectors.detect(&normalized, &graph, cli.dry_run);
-                            metrics.add_detector_fires(findings.len());
-                            for finding in findings {
-                                let alert = AlertRecord::from_finding(&finding);
-                                let value = alert.as_value()?;
-                                validate(&value).context("validate alert against schema")?;
-                                emit_ndjson_line(&mut sink, &value)?;
-                            }
-                        }
-                    }
+                    let emitted =
+                        pipeline.process_raw_event_bytes(&raw, &mut *sink, cli.dry_run)?;
+                    metrics.add_detector_fires(emitted);
                 }
-                metrics.maybe_log(collector.counters());
+                metrics.maybe_log(pipeline.collector_counters());
             }
         }
     }
@@ -158,7 +117,7 @@ mod tests {
     use serde_json::Value;
     use tempfile::NamedTempFile;
     use tokio::sync::oneshot;
-    use veriskein_proto::EventFixture;
+    use veriskein_proto::{ContentChannel, ContentDirection, EventFixture};
 
     use super::{EventSource, Result, run_with_source_and_sink};
     use crate::Cli;
@@ -284,5 +243,74 @@ mod tests {
             .collect();
         assert!(kinds.contains(&"sensitive_file_access".to_string()));
         assert!(kinds.contains(&"out_of_workspace_deletion".to_string()));
+    }
+
+    #[tokio::test]
+    async fn driver_links_tls_prompt_to_later_risky_event() {
+        let prompt = br#"{"prompt":"please inspect /etc/shadow"}"#;
+        let values = drive_alerts(
+            vec![
+                seeded_exec_bytes(),
+                EventFixture::for_pid(2, TEST_ROOT_PID, 1, "claude").content_frag(
+                    0xabc,
+                    0,
+                    ContentChannel::Tls,
+                    ContentDirection::Write,
+                    prompt,
+                    false,
+                ),
+                EventFixture::for_pid(3, TEST_ROOT_PID, 1, "claude").open(-100, 3, "/etc/shadow"),
+            ],
+            false,
+        )
+        .await;
+
+        let alert = values
+            .iter()
+            .find(|value| value["type"] == "sensitive_file_access")
+            .expect("sensitive alert");
+        assert!(
+            alert["evidence"]
+                .as_array()
+                .expect("evidence array")
+                .iter()
+                .any(|evidence| evidence["kind"] == "prompt_ref")
+        );
+        assert!(
+            alert["evidence"]
+                .as_array()
+                .expect("evidence array")
+                .iter()
+                .all(|evidence| evidence["kind"] != "capture_health")
+        );
+    }
+
+    #[tokio::test]
+    async fn driver_adds_capture_health_when_prompt_is_unavailable() {
+        let values = drive_alerts(
+            vec![
+                seeded_exec_bytes(),
+                EventFixture::for_pid(2, TEST_ROOT_PID, 1, "claude").open(-100, 3, "/etc/shadow"),
+            ],
+            false,
+        )
+        .await;
+
+        let alert = values
+            .iter()
+            .find(|value| value["type"] == "sensitive_file_access")
+            .expect("sensitive alert");
+        let evidence = alert["evidence"].as_array().expect("evidence array");
+        assert!(
+            evidence
+                .iter()
+                .any(|evidence| evidence["kind"] == "capture_health"
+                    && evidence["note"] == "capture_unavailable")
+        );
+        assert!(
+            evidence
+                .iter()
+                .all(|evidence| evidence["kind"] != "prompt_ref")
+        );
     }
 }

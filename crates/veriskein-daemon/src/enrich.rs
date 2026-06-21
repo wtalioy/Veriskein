@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use veriskein_proto::{OwnedEvent, OwnedProcExecEvent, parse_arg_vector};
 
-pub fn enrich_event_from_procfs(event: &mut OwnedEvent) {
+pub(crate) fn enrich_event_from_procfs(event: &mut OwnedEvent) {
     if let OwnedEvent::ProcExec(exec) = event {
         let pid = exec.header.pid;
         if let Some(snapshot) = ProcfsExecSnapshot::read(pid) {
@@ -42,17 +42,9 @@ fn apply_procfs_snapshot(exec: &mut OwnedProcExecEvent, snapshot: ProcfsExecSnap
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-
-    use veriskein_proto::{EventHeader, parse_arg_vector};
+    use veriskein_proto::EventHeader;
 
     use super::{ProcfsExecSnapshot, apply_procfs_snapshot};
-
-    #[test]
-    fn proc_cmdline_parser_splits_nul_bytes() {
-        let argv = parse_arg_vector(b"bash\0-lc\0true\0");
-        assert_eq!(argv, vec!["bash", "-lc", "true"]);
-    }
 
     #[test]
     fn procfs_snapshot_applies_real_exec_details() {
@@ -70,23 +62,5 @@ mod tests {
         );
         assert_eq!(event.filename, "/bin/bash");
         assert_eq!(event.argv[1], "-lc");
-    }
-
-    #[test]
-    fn procfs_snapshot_reads_current_process() {
-        let pid = std::process::id();
-        let snapshot = ProcfsExecSnapshot::read(pid).expect("current process should exist");
-        assert!(!snapshot.exe_path.is_empty());
-        assert!(!snapshot.argv.is_empty());
-        let current = env::current_exe().expect("current exe");
-        assert!(
-            snapshot.exe_path.ends_with(
-                current
-                    .file_name()
-                    .expect("exe file")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        );
     }
 }

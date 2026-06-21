@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{DropReason, EventHeader, EventId, EventKind};
+use crate::{ContentChannel, ContentDirection, DropReason, EventHeader, EventId, EventKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OwnedProcForkEvent {
@@ -84,6 +84,19 @@ pub struct OwnedNetConnectEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OwnedContentFragEvent {
+    pub header: EventHeader,
+    pub ssl_ctx: u64,
+    pub stream_offset: u64,
+    pub byte_len: u32,
+    pub frag_len: u32,
+    pub channel: ContentChannel,
+    pub direction: ContentDirection,
+    pub flags: u16,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OwnedMetaDropEvent {
     pub header: EventHeader,
     pub expected_seq: u64,
@@ -104,6 +117,7 @@ pub enum OwnedEvent {
     FileUnlink(OwnedFileUnlinkEvent),
     FileRename(OwnedFileRenameEvent),
     NetConnect(OwnedNetConnectEvent),
+    ContentFrag(OwnedContentFragEvent),
     MetaDrop(OwnedMetaDropEvent),
 }
 
@@ -119,6 +133,7 @@ impl OwnedEvent {
             Self::FileUnlink(evt) => &evt.header,
             Self::FileRename(evt) => &evt.header,
             Self::NetConnect(evt) => &evt.header,
+            Self::ContentFrag(evt) => &evt.header,
             Self::MetaDrop(evt) => &evt.header,
         }
     }
@@ -134,21 +149,63 @@ impl OwnedEvent {
             Self::FileUnlink(_) => EventKind::FileUnlink,
             Self::FileRename(_) => EventKind::FileRename,
             Self::NetConnect(_) => EventKind::NetConnect,
+            Self::ContentFrag(_) => EventKind::ContentFrag,
             Self::MetaDrop(_) => EventKind::MetaDrop,
         }
     }
 
     pub fn event_id(&self) -> EventId {
-        let header = self.header();
-        let pid = header.pid;
-        let tid = header.tid;
-        let seq = header.seq;
-        let ts_ns = header.ts_ns;
-        let kind = header.kind;
-        // Event ids are deterministic from kernel header fields so the same
-        // event keeps a stable identity across parse / reserialize boundaries.
-        let seed = format!("{}:{}:{}:{}:{}", pid, tid, seq, ts_ns, kind);
-        EventId::from_seed(seed.as_bytes())
+        event_id_from_header(self.header())
+    }
+
+    pub fn event_id_hex(&self) -> String {
+        event_id_hex_from_header(self.header())
+    }
+}
+
+pub fn event_id_from_header(header: &EventHeader) -> EventId {
+    let pid = header.pid;
+    let tid = header.tid;
+    let seq = header.seq;
+    let ts_ns = header.ts_ns;
+    let kind = header.kind;
+    // Event ids are deterministic from kernel header fields so the same
+    // event keeps a stable identity across parse / reserialize boundaries.
+    let seed = format!("{}:{}:{}:{}:{}", pid, tid, seq, ts_ns, kind);
+    EventId::from_seed(seed.as_bytes())
+}
+
+pub fn event_id_hex_from_header(header: &EventHeader) -> String {
+    event_id_from_header(header).hex()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdDupEffect {
+    Close { fd: i32 },
+    Duplicate { oldfd: i32, newfd: i32 },
+    Noop,
+}
+
+pub fn fd_dup_effect(oldfd: i32, newfd: i32, dup_ret: i32) -> FdDupEffect {
+    if oldfd == -1 {
+        return if dup_ret == 0 {
+            FdDupEffect::Close { fd: newfd }
+        } else {
+            FdDupEffect::Noop
+        };
+    }
+
+    if dup_ret < 0 {
+        return if newfd >= 0 {
+            FdDupEffect::Close { fd: newfd }
+        } else {
+            FdDupEffect::Noop
+        };
+    }
+
+    FdDupEffect::Duplicate {
+        oldfd,
+        newfd: if newfd >= 0 { newfd } else { dup_ret },
     }
 }
 
@@ -163,6 +220,7 @@ pub enum EventRef<'a> {
     FileUnlink(&'a crate::FileUnlinkEvent),
     FileRename(&'a crate::FileRenameEvent),
     NetConnect(&'a crate::NetConnectEvent),
+    ContentFrag(&'a crate::ContentFragEvent),
     MetaDrop(&'a crate::MetaDropEvent),
 }
 
@@ -178,6 +236,7 @@ impl<'a> EventRef<'a> {
             Self::FileUnlink(evt) => &evt.header,
             Self::FileRename(evt) => &evt.header,
             Self::NetConnect(evt) => &evt.header,
+            Self::ContentFrag(evt) => &evt.header,
             Self::MetaDrop(evt) => &evt.header,
         }
     }
@@ -254,6 +313,21 @@ impl<'a> EventRef<'a> {
                 addr_dst: evt.addr_dst,
                 addr_src: evt.addr_src,
             }),
+            Self::ContentFrag(evt) => {
+                let frag_len = (evt.frag_len as usize).min(evt.data.len());
+                OwnedEvent::ContentFrag(OwnedContentFragEvent {
+                    header: evt.header,
+                    ssl_ctx: evt.ssl_ctx,
+                    stream_offset: evt.stream_offset,
+                    byte_len: evt.byte_len,
+                    frag_len: evt.frag_len,
+                    channel: ContentChannel::from_raw(evt.channel).unwrap_or(ContentChannel::Tls),
+                    direction: ContentDirection::from_raw(evt.direction)
+                        .unwrap_or(ContentDirection::Write),
+                    flags: evt.flags,
+                    data: evt.data[..frag_len].to_vec(),
+                })
+            }
             Self::MetaDrop(evt) => OwnedEvent::MetaDrop(OwnedMetaDropEvent {
                 header: evt.header,
                 expected_seq: evt.expected_seq,
@@ -265,5 +339,39 @@ impl<'a> EventRef<'a> {
                 reason: DropReason::from_raw(evt.reason).unwrap_or(DropReason::SeqGap),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FdDupEffect, fd_dup_effect};
+
+    #[test]
+    fn fd_dup_effect_closes_from_close_sentinel() {
+        assert_eq!(fd_dup_effect(-1, 9, 0), FdDupEffect::Close { fd: 9 });
+    }
+
+    #[test]
+    fn fd_dup_effect_failed_dup2_closes_destination() {
+        assert_eq!(fd_dup_effect(3, 9, -1), FdDupEffect::Close { fd: 9 });
+    }
+
+    #[test]
+    fn fd_dup_effect_successful_dup2_uses_newfd() {
+        assert_eq!(
+            fd_dup_effect(3, 9, 9),
+            FdDupEffect::Duplicate { oldfd: 3, newfd: 9 }
+        );
+    }
+
+    #[test]
+    fn fd_dup_effect_uses_dup_return_destination_without_newfd() {
+        assert_eq!(
+            fd_dup_effect(3, -1, 11),
+            FdDupEffect::Duplicate {
+                oldfd: 3,
+                newfd: 11
+            }
+        );
     }
 }

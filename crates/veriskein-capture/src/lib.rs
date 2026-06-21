@@ -1,3 +1,10 @@
-//! Placeholder crate for later capture orchestration work.
-//! The daemon can emit alerts without capture today, but capture stays split so
-//! graph attribution never becomes responsible for artifact collection policy.
+//! Capture attachment reconciliation for Phase 3 TLS prompt capture.
+
+mod maps;
+mod reconcile;
+
+pub use maps::{LibraryMapping, MapsProvider, ProcMapsProvider};
+pub use reconcile::{
+    AttachSink, CaptureReconciler, CaptureStatus, CaptureStatusKind, RuntimeAttachSink,
+    role_allows_capture,
+};

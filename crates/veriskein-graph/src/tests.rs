@@ -1,4 +1,5 @@
 use std::net::ToSocketAddrs;
+use std::path::PathBuf;
 
 use veriskein_normalizer::{
     NormalizedData, NormalizedEvent, PathContext, PathResolution, PathResolutionMode, PathVerdict,
@@ -101,6 +102,42 @@ fn path_context(path: &str) -> PathContext {
         sensitive_rule: None,
         sensitive_severity: None,
     }
+}
+
+#[test]
+fn workspace_inputs_with_default_uses_config_when_empty() {
+    let config = AgentConfig {
+        default_workspace: "/tmp/default-ws".to_string(),
+        binary_seeds: Vec::new(),
+        env_hints: Vec::new(),
+        argv_hints: Vec::new(),
+        llm_endpoints: Vec::new(),
+        shell_allowlist: Vec::new(),
+        sensitive_allowlist: Vec::new(),
+        delete_allowlist: Vec::new(),
+    };
+
+    assert_eq!(
+        config.workspace_inputs_with_default(&[]),
+        vec![PathBuf::from("/tmp/default-ws")]
+    );
+}
+
+#[test]
+fn workspace_inputs_with_default_preserves_explicit_inputs() {
+    let config = AgentConfig {
+        default_workspace: "/tmp/default-ws".to_string(),
+        binary_seeds: Vec::new(),
+        env_hints: Vec::new(),
+        argv_hints: Vec::new(),
+        llm_endpoints: Vec::new(),
+        shell_allowlist: Vec::new(),
+        sensitive_allowlist: Vec::new(),
+        delete_allowlist: Vec::new(),
+    };
+    let explicit = vec![PathBuf::from("/tmp/explicit-ws")];
+
+    assert_eq!(config.workspace_inputs_with_default(&explicit), explicit);
 }
 
 #[test]

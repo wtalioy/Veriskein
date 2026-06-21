@@ -1,9 +1,9 @@
 use thiserror::Error;
 
 use crate::{
-    EventHeader, EventKind, EventRef, FdDupEvent, FileOpenEvent, FileRenameEvent, FileUnlinkEvent,
-    MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent, ProcExitEvent, ProcForkEvent,
-    defaults,
+    ContentFragEvent, EventHeader, EventKind, EventRef, FdDupEvent, FileOpenEvent, FileRenameEvent,
+    FileUnlinkEvent, MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent, ProcExitEvent,
+    ProcForkEvent, defaults,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -53,6 +53,9 @@ pub fn parse(buf: &[u8]) -> Result<EventRef<'_>, ParseError> {
         EventKind::NetConnect => {
             parse_as::<NetConnectEvent>(&buf[..total_len]).map(EventRef::NetConnect)
         }
+        EventKind::ContentFrag => {
+            parse_as::<ContentFragEvent>(&buf[..total_len]).map(EventRef::ContentFrag)
+        }
         EventKind::MetaDrop => parse_as::<MetaDropEvent>(&buf[..total_len]).map(EventRef::MetaDrop),
     }
 }
@@ -93,7 +96,9 @@ pub fn parse_path_pair(bytes: &[u8]) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{DropReason, EventFixture, EventKind, EventRef, OwnedEvent};
+    use crate::{
+        ContentChannel, ContentDirection, DropReason, EventFixture, EventKind, EventRef, OwnedEvent,
+    };
 
     use super::{ParseError, parse, parse_c_string};
 
@@ -235,6 +240,28 @@ mod tests {
                 assert_eq!(evt.reason, DropReason::SeqGap);
             }
             _ => panic!("expected drop"),
+        }
+    }
+
+    #[test]
+    fn parse_content_frag_roundtrip() {
+        let raw = EventFixture::for_pid(10, 1000, 1, "curl").content_frag(
+            0xabc,
+            5,
+            ContentChannel::Tls,
+            ContentDirection::Write,
+            b"POST /v1/chat\r\n\r\n{}",
+            false,
+        );
+        match parse_owned(raw, "content frag") {
+            OwnedEvent::ContentFrag(evt) => {
+                assert_eq!(evt.ssl_ctx, 0xabc);
+                assert_eq!(evt.stream_offset, 5);
+                assert_eq!(evt.channel, ContentChannel::Tls);
+                assert_eq!(evt.direction, ContentDirection::Write);
+                assert_eq!(evt.data, b"POST /v1/chat\r\n\r\n{}");
+            }
+            _ => panic!("expected content frag"),
         }
     }
 }

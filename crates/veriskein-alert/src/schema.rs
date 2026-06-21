@@ -59,11 +59,17 @@ pub fn sample_alert_value() -> Value {
         }],
         "fallback": {
             "mode": "none",
-            "visibility": "full"
+            "visibility": "full",
+            "prompt_evidence": "unavailable",
+            "degradation_sources": []
         },
         "policy": {
             "detector_version": 1,
             "policy_version": 1
+        },
+        "capture": {
+            "mode": "none",
+            "lag_ms": null
         }
     })
 }

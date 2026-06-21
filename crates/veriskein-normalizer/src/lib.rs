@@ -8,5 +8,5 @@ pub use config::{
 };
 pub use state::{
     NormalizedData, NormalizedEvent, Normalizer, PathContext, PathResolution, PathResolutionMode,
-    PathVerdict, ProcessSnapshot,
+    PathVerdict, ProcessSnapshot, path_basename,
 };

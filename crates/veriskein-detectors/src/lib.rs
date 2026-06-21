@@ -8,7 +8,8 @@ mod signals;
 #[cfg(test)]
 mod tests;
 
-pub use engine::{DetectorEngine, detect};
+pub use engine::DetectorEngine;
 pub use finding::{
-    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, VisibilityState,
+    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
+    VisibilityState,
 };

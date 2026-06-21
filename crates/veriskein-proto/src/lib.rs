@@ -15,16 +15,17 @@ mod wire;
 
 pub use contracts::{DETECTOR_INPUTS, RECONCILERS, REGISTRY_OWNERS};
 pub use ids::{AgentId, ArtifactId, ChainId, EventId, PromptId, SessionId};
-pub use kinds::{DropReason, EventKind};
+pub use kinds::{ContentChannel, ContentDirection, DropReason, EventKind};
 pub use owned::{
-    EventRef, OwnedEvent, OwnedFdDupEvent, OwnedFileOpenEvent, OwnedFileRenameEvent,
-    OwnedFileUnlinkEvent, OwnedMetaDropEvent, OwnedNetConnectEvent, OwnedProcChdirEvent,
-    OwnedProcExecEvent, OwnedProcExitEvent, OwnedProcForkEvent,
+    EventRef, FdDupEffect, OwnedContentFragEvent, OwnedEvent, OwnedFdDupEvent, OwnedFileOpenEvent,
+    OwnedFileRenameEvent, OwnedFileUnlinkEvent, OwnedMetaDropEvent, OwnedNetConnectEvent,
+    OwnedProcChdirEvent, OwnedProcExecEvent, OwnedProcExitEvent, OwnedProcForkEvent,
+    event_id_from_header, event_id_hex_from_header, fd_dup_effect,
 };
 pub use parse::{ParseError, parse, parse_arg_vector, parse_c_string, parse_path_pair};
 pub use runtime::{AttributionStrength, Role, RoleTag, VisibilityState};
 pub use test_support::EventFixture;
 pub use wire::{
-    EventHeader, FdDupEvent, FileOpenEvent, FileRenameEvent, FileUnlinkEvent, MetaDropEvent,
-    NetConnectEvent, ProcChdirEvent, ProcExecEvent, ProcExitEvent, ProcForkEvent,
+    ContentFragEvent, EventHeader, FdDupEvent, FileOpenEvent, FileRenameEvent, FileUnlinkEvent,
+    MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent, ProcExitEvent, ProcForkEvent,
 };

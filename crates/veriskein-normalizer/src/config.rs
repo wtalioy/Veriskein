@@ -12,7 +12,6 @@ pub struct WorkspaceRef {
 
 #[derive(Debug, Clone)]
 pub struct GlobList {
-    globs: Vec<String>,
     matchers: Vec<GlobMatcher>,
 }
 
@@ -78,16 +77,12 @@ impl GlobList {
                     .compile_matcher())
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self { globs, matchers })
+        Ok(Self { matchers })
     }
 
     pub fn is_match<P: AsRef<Path>>(&self, path: P) -> bool {
         let path = path.as_ref();
         self.matchers.iter().any(|matcher| matcher.is_match(path))
-    }
-
-    pub fn patterns(&self) -> &[String] {
-        &self.globs
     }
 }
 
@@ -130,7 +125,7 @@ pub fn lexical_clean(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{GlobList, SensitiveConfig, WorkspaceRef, lexical_clean};
+    use super::{GlobList, SensitiveConfig, lexical_clean};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -164,21 +159,11 @@ severity = "high"
     }
 
     #[test]
-    fn workspace_id_is_stable_for_lookup() {
-        let ws = WorkspaceRef {
-            id: "ws-1".to_string(),
-            root: PathBuf::from("/tmp/ws"),
-        };
-        assert_eq!(ws.id, "ws-1");
-    }
-
-    #[test]
     fn glob_list_matches_paths() {
         let list =
             GlobList::new(vec!["/tmp/**".to_string(), "/bin/sh".to_string()]).expect("glob list");
         assert!(list.is_match("/tmp/demo.txt"));
         assert!(list.is_match("/bin/sh"));
         assert!(!list.is_match("/etc/passwd"));
-        assert_eq!(list.patterns().len(), 2);
     }
 }

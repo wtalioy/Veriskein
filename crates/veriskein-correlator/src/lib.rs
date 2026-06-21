@@ -1,3 +1,8 @@
-//! Placeholder crate for later provenance and chain scoring work.
-//! This exists to reserve correlation as its own module boundary rather than
-//! letting early detector heuristics hard-code long-term scoring logic.
+//! Prompt storage and same-session correlation.
+
+mod prompt;
+
+pub use prompt::{
+    PromptEvidence, PromptEvidenceKind, PromptInput, PromptRiskLink, PromptStore,
+    RepeatedPromptSignal,
+};

@@ -1,7 +1,7 @@
-use veriskein_normalizer::NormalizedEvent;
+use veriskein_normalizer::{NormalizedEvent, path_basename};
 use veriskein_proto::Role;
 
-use super::{Attribution, GraphState, basename};
+use super::{Attribution, GraphState};
 
 impl GraphState {
     pub(super) fn apply_role(
@@ -26,7 +26,7 @@ impl GraphState {
         if event.process.pid == attribution.root_pid {
             return Role::RootAgent;
         }
-        let name = basename(filename);
+        let name = path_basename(filename);
         if matches!(name, "sh" | "bash" | "zsh" | "dash" | "fish")
             && self
                 .resolve(event.process.ppid)

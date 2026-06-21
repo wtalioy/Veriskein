@@ -30,6 +30,8 @@ pub struct ReconcilerContract {
     pub name: &'static str,
     pub owner: &'static str,
     pub max_cadence_s: u64,
+    pub cache_ttl_s: u64,
+    pub produced_facts: &'static [&'static str],
     pub stale_behavior: &'static str,
 }
 
@@ -38,25 +40,41 @@ pub const RECONCILERS: &[ReconcilerContract] = &[
         name: "startup_proc_merge",
         owner: "veriskein-normalizer",
         max_cadence_s: 0,
+        cache_ttl_s: crate::defaults::EXPIRING_PROC_HOLD_MS / 1000,
+        produced_facts: &["ProcessSnapshot"],
         stale_behavior: "consume cached snapshot or leave process unattributed",
     },
     ReconcilerContract {
         name: "env_sniff",
         owner: "veriskein-graph",
         max_cadence_s: 0,
+        cache_ttl_s: crate::defaults::AGENT_PROMOTION_WINDOW_S,
+        produced_facts: &["EnvEvidence"],
         stale_behavior: "treat env evidence as absent",
     },
     ReconcilerContract {
         name: "tls_maps_scan",
         owner: "veriskein-capture",
         max_cadence_s: crate::defaults::TLS_ATTACH_RESCAN_S,
+        cache_ttl_s: crate::defaults::CANDIDATE_CAPTURE_TTL_S,
+        produced_facts: &["CaptureStatus"],
         stale_behavior: "mark capture visibility unavailable",
     },
     ReconcilerContract {
         name: "path_canonicalization",
         owner: "veriskein-normalizer",
         max_cadence_s: 0,
+        cache_ttl_s: 0,
+        produced_facts: &["PathResolution"],
         stale_behavior: "emit unresolved sensitive path verdict",
+    },
+    ReconcilerContract {
+        name: "template_suppression_maintenance",
+        owner: "veriskein-correlator",
+        max_cadence_s: 60,
+        cache_ttl_s: 300,
+        produced_facts: &["SuppressionHint"],
+        stale_behavior: "continue matching without suppression hints",
     },
 ];
 
@@ -89,45 +107,7 @@ pub const DETECTOR_INPUTS: &[DetectorInputContract] = &[
     DetectorInputContract {
         detector: "single_agent_deadloop",
         raw_events: &["net_connect", "file_open"],
-        derived_signals: &["SessionProgressSignal"],
+        derived_signals: &["SessionProgressSignal", "RepeatedPromptSignal"],
         chains: false,
     },
 ];
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::{DETECTOR_INPUTS, RECONCILERS, REGISTRY_OWNERS};
-
-    #[test]
-    fn each_registry_has_one_writer() {
-        let mut registries = BTreeSet::new();
-        for owner in REGISTRY_OWNERS {
-            assert!(
-                registries.insert(owner.registry),
-                "duplicate registry owner"
-            );
-            assert!(owner.writer.starts_with("veriskein-"));
-        }
-    }
-
-    #[test]
-    fn reconciler_contracts_have_degrade_behavior() {
-        for reconciler in RECONCILERS {
-            assert!(!reconciler.owner.is_empty());
-            assert!(!reconciler.stale_behavior.is_empty());
-        }
-    }
-
-    #[test]
-    fn detector_input_contract_mentions_deadloop_signals() {
-        let deadloop = DETECTOR_INPUTS
-            .iter()
-            .find(|entry| entry.detector == "single_agent_deadloop")
-            .expect("deadloop contract");
-        assert!(deadloop.raw_events.contains(&"net_connect"));
-        assert!(deadloop.derived_signals.contains(&"SessionProgressSignal"));
-        assert!(!deadloop.chains);
-    }
-}

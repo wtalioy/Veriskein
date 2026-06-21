@@ -5,8 +5,9 @@ use veriskein_normalizer::{
     ProcessSnapshot,
 };
 use veriskein_proto::EventKind;
+use veriskein_proto::VisibilityState;
 
-use crate::{FdIdentityKind, StateNet};
+use crate::{StateNet, state::FdIdentityKind};
 
 fn process() -> ProcessSnapshot {
     ProcessSnapshot {
@@ -153,4 +154,52 @@ fn connect_publishes_endpoint_snapshot() {
         state.fd_snapshot(10, 4).expect("socket").kind,
         FdIdentityKind::Socket
     );
+}
+
+#[test]
+fn tls_fragment_attribution_uses_single_tls_endpoint() {
+    let mut state = StateNet::new();
+    state.apply(&event(
+        1,
+        NormalizedData::NetConnect {
+            sockfd: 4,
+            dport_be: 443_u16.to_be(),
+            dst_ip: Some("127.0.0.1".to_string()),
+            dst_port: Some(443),
+            tls_candidate: true,
+        },
+    ));
+
+    let attribution = state.record_tls_fragment(10, 0xabc, 2);
+
+    assert_eq!(attribution.visibility_state, VisibilityState::Full);
+    assert_eq!(attribution.endpoint.expect("endpoint").ip, "127.0.0.1");
+    assert!(attribution.degradation_reason.is_none());
+}
+
+#[test]
+fn tls_fragment_attribution_degrades_when_endpoint_is_missing_or_ambiguous() {
+    let mut state = StateNet::new();
+
+    let missing = state.record_tls_fragment(10, 0xabc, 1);
+    assert_eq!(missing.visibility_state, VisibilityState::Partial);
+    assert_eq!(missing.degradation_reason, Some("missing_tls_endpoint"));
+
+    for seq in 1..=2 {
+        state.apply(&event(
+            seq,
+            NormalizedData::NetConnect {
+                sockfd: seq as i32,
+                dport_be: 443_u16.to_be(),
+                dst_ip: Some(format!("127.0.0.{seq}")),
+                dst_port: Some(443),
+                tls_candidate: true,
+            },
+        ));
+    }
+
+    let ambiguous = state.record_tls_fragment(10, 0xabc, 3);
+    assert_eq!(ambiguous.visibility_state, VisibilityState::Partial);
+    assert_eq!(ambiguous.degradation_reason, Some("inferred_tls_endpoint"));
+    assert_eq!(ambiguous.endpoint.expect("latest endpoint").ip, "127.0.0.2");
 }

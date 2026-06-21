@@ -1812,6 +1812,13 @@ dependencies = [
 [[package]]
 name = "veriskein-capture"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "veriskein-bpf",
+ "veriskein-graph",
+ "veriskein-proto",
+]
 
 [[package]]
 name = "veriskein-collector"
@@ -1825,10 +1832,20 @@ dependencies = [
 [[package]]
 name = "veriskein-content"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "veriskein-proto",
+]
 
 [[package]]
 name = "veriskein-correlator"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "veriskein-proto",
+]
 
 [[package]]
 name = "veriskein-daemon"
@@ -1846,7 +1863,10 @@ dependencies = [
  "tracing-subscriber",
  "veriskein-alert",
  "veriskein-bpf",
+ "veriskein-capture",
  "veriskein-collector",
+ "veriskein-content",
+ "veriskein-correlator",
  "veriskein-detectors",
  "veriskein-graph",
  "veriskein-normalizer",
@@ -1859,6 +1879,7 @@ name = "veriskein-detectors"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "veriskein-correlator",
  "veriskein-graph",
  "veriskein-normalizer",
  "veriskein-proto",

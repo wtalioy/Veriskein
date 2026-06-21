@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use veriskein_alert::stdout_sink;
 
-pub fn open_sink(path: Option<&Path>) -> Result<Box<dyn Write + Send>> {
+pub(crate) fn open_sink(path: Option<&Path>) -> Result<Box<dyn Write + Send>> {
     match path {
         Some(path) => {
             let file = File::create(path)

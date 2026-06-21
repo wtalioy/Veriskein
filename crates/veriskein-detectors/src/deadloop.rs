@@ -1,14 +1,12 @@
 use std::collections::{BTreeMap, VecDeque};
 
+use veriskein_correlator::{PromptEvidence, PromptEvidenceKind};
 use veriskein_graph::Attribution;
 use veriskein_normalizer::{NormalizedData, NormalizedEvent};
 use veriskein_proto::defaults;
 
-use crate::base::session_binding;
-use crate::finding::{
-    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, VisibilityState,
-};
-use crate::signals::{DetectorSignal, preferred_path};
+use crate::finding::{Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType};
+use crate::signals::DetectorSignal;
 
 #[derive(Debug, Default)]
 pub(crate) struct DeadloopDetector {
@@ -20,10 +18,10 @@ impl DeadloopDetector {
     pub(crate) fn apply(
         &mut self,
         event: &NormalizedEvent,
-        binding: Option<&Attribution>,
+        binding: &Attribution,
         signals: &[DetectorSignal],
+        prompt_evidence: &[PromptEvidence],
     ) -> Option<Finding> {
-        let binding = session_binding(binding)?;
         let session_id = binding.session_id.hex();
         let window_ns = defaults::DEADLOOP_WINDOW_S * 1_000_000_000;
         let session = self.sessions.entry(session_id.clone()).or_default();
@@ -60,7 +58,7 @@ impl DeadloopDetector {
                     ingest_seq: event.ingest_seq,
                     ip: None,
                     port: None,
-                    path: Some(preferred_path(path)),
+                    path: Some(path.preferred_path_string()),
                     evidence_kind: "file_access",
                     progress,
                 },
@@ -85,39 +83,7 @@ impl DeadloopDetector {
             return None;
         }
 
-        let connect_threshold =
-            defaults::DEADLOOP_CONNECT_RATE_PMIN * (defaults::DEADLOOP_WINDOW_S as u32 / 60);
-        let top_connect = session
-            .connect_counts
-            .iter()
-            .max_by_key(|(_, count)| **count)
-            .map(|((ip, port), count)| (ip.clone(), *port, *count));
-        let top_file = session
-            .file_counts
-            .iter()
-            .max_by_key(|(_, count)| **count)
-            .map(|(path, count)| (path.clone(), *count));
-        let activity_attempts = session.events.len() as u32;
-        let low_progress = activity_attempts >= defaults::DEADLOOP_FILE_REPEAT
-            && (session.progress_signals as f32 / activity_attempts.max(1) as f32) < 0.05;
-
-        let core_match = match (top_connect, top_file) {
-            (Some((endpoint_ip, endpoint_port, connect_count)), Some((path, file_count)))
-                if connect_count >= connect_threshold
-                    && file_count >= defaults::DEADLOOP_FILE_REPEAT
-                    && low_progress =>
-            {
-                DeadloopCoreMatch {
-                    endpoint_ip,
-                    endpoint_port,
-                    path,
-                    connect_count,
-                    file_count,
-                    low_progress,
-                }
-            }
-            _ => return None,
-        };
+        let core_match = session.match_rules(prompt_evidence)?;
 
         self.cooldown_until_ns.insert(
             session_id.clone(),
@@ -129,6 +95,7 @@ impl DeadloopDetector {
             &session_id,
             &session.events,
             &core_match,
+            prompt_evidence,
         ))
     }
 }
@@ -147,12 +114,29 @@ struct LoopEvent {
 
 #[derive(Debug, Clone)]
 struct DeadloopCoreMatch {
-    endpoint_ip: String,
-    endpoint_port: u16,
-    path: String,
-    connect_count: u32,
-    file_count: u32,
+    connect: Option<ConnectMatch>,
+    file: Option<FileMatch>,
+    prompt: Option<PromptMatch>,
     low_progress: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectMatch {
+    ip: String,
+    port: u16,
+    count: u32,
+}
+
+#[derive(Debug, Clone)]
+struct FileMatch {
+    path: String,
+    count: u32,
+}
+
+#[derive(Debug, Clone)]
+struct PromptMatch {
+    prompt_id: String,
+    count: u32,
 }
 
 #[derive(Debug, Default)]
@@ -191,6 +175,51 @@ impl DeadloopSession {
             self.progress_signals = self.progress_signals.saturating_sub(1);
         }
     }
+
+    fn match_rules(&self, prompt_evidence: &[PromptEvidence]) -> Option<DeadloopCoreMatch> {
+        let connect_threshold =
+            defaults::DEADLOOP_CONNECT_RATE_PMIN * (defaults::DEADLOOP_WINDOW_S as u32 / 60);
+        let connect = self
+            .connect_counts
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .map(|((ip, port), count)| ConnectMatch {
+                ip: ip.clone(),
+                port: *port,
+                count: *count,
+            })
+            .filter(|connect| connect.count >= connect_threshold);
+        let file = self
+            .file_counts
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .map(|(path, count)| FileMatch {
+                path: path.clone(),
+                count: *count,
+            })
+            .filter(|file| file.count >= defaults::DEADLOOP_FILE_REPEAT);
+        let prompt = prompt_evidence
+            .iter()
+            .find_map(|evidence| match evidence.kind {
+                PromptEvidenceKind::RepeatedPrompt { count } => Some(PromptMatch {
+                    prompt_id: evidence.prompt_id.clone(),
+                    count,
+                }),
+                PromptEvidenceKind::RiskLink { .. } => None,
+            })
+            .filter(|prompt| prompt.count >= defaults::DEADLOOP_PROMPT_DUP);
+        let activity_attempts = self.events.len() as u32;
+        let low_progress = activity_attempts >= defaults::DEADLOOP_FILE_REPEAT
+            && (self.progress_signals as f32 / activity_attempts.max(1) as f32) < 0.05;
+        let activity_rule_count =
+            u32::from(connect.is_some()) + u32::from(file.is_some()) + u32::from(prompt.is_some());
+        (low_progress && activity_rule_count >= 2).then_some(DeadloopCoreMatch {
+            connect,
+            file,
+            prompt,
+            low_progress,
+        })
+    }
 }
 
 fn decrement_count<K>(counts: &mut BTreeMap<K, u32>, key: &K)
@@ -212,14 +241,16 @@ fn deadloop_finding(
     session_id: &str,
     events: &VecDeque<LoopEvent>,
     core_match: &DeadloopCoreMatch,
+    prompt_evidence: &[PromptEvidence],
 ) -> Finding {
     let mut paths = Vec::new();
     let mut ips = Vec::new();
     let mut ports = Vec::new();
     let mut evidence = Vec::new();
     for entry in events {
-        let matches_top_connect = entry.ip.as_ref() == Some(&core_match.endpoint_ip)
-            && entry.port == Some(core_match.endpoint_port);
+        let matches_top_connect = core_match.connect.as_ref().is_some_and(|connect| {
+            entry.ip.as_ref() == Some(&connect.ip) && entry.port == Some(connect.port)
+        });
         if entry.evidence_kind == "net_connect"
             && matches_top_connect
             && evidence
@@ -232,17 +263,17 @@ fn deadloop_finding(
             if let Some(port) = entry.port {
                 ports.push(port);
             }
-            evidence.push(FindingEvidence {
-                kind: "net_connect",
-                event_id: entry.event_id.clone(),
-                ingest_seq: entry.ingest_seq,
-                path: None,
-                ip: entry.ip.clone(),
-                port: entry.port,
-                note: None,
-            });
+            evidence.push(FindingEvidence::net_connect(
+                entry.event_id.clone(),
+                entry.ingest_seq,
+                entry.ip.clone(),
+                entry.port,
+            ));
         }
-        let matches_top_file = entry.path.as_ref() == Some(&core_match.path);
+        let matches_top_file = core_match
+            .file
+            .as_ref()
+            .is_some_and(|file| entry.path.as_ref() == Some(&file.path));
         if entry.evidence_kind == "file_access"
             && matches_top_file
             && evidence.iter().all(|e| e.kind != "file_access")
@@ -250,15 +281,11 @@ fn deadloop_finding(
             if let Some(path) = &entry.path {
                 paths.push(path.clone());
             }
-            evidence.push(FindingEvidence {
-                kind: "file_access",
-                event_id: entry.event_id.clone(),
-                ingest_seq: entry.ingest_seq,
-                path: entry.path.clone(),
-                ip: None,
-                port: None,
-                note: None,
-            });
+            evidence.push(FindingEvidence::file_access_ref(
+                entry.event_id.clone(),
+                entry.ingest_seq,
+                entry.path.clone(),
+            ));
         }
         if evidence.iter().any(|e| e.kind == "net_connect")
             && evidence.iter().any(|e| e.kind == "file_access")
@@ -266,14 +293,48 @@ fn deadloop_finding(
             break;
         }
     }
+    if let Some(prompt) = &core_match.prompt
+        && evidence.iter().all(|e| e.kind != "prompt_ref")
+    {
+        evidence.push(FindingEvidence::prompt_ref(
+            prompt.prompt_id.clone(),
+            event.ingest_seq,
+            Some(format!("repeated_prompt_count={}", prompt.count)),
+        ));
+    }
 
     let mut scores = BTreeMap::new();
-    scores.insert("connect_rate", core_match.connect_count as f32);
-    scores.insert("file_repeat", core_match.file_count as f32);
+    scores.insert(
+        "connect_rate",
+        core_match
+            .connect
+            .as_ref()
+            .map(|connect| connect.count as f32)
+            .unwrap_or(0.0),
+    );
+    scores.insert(
+        "file_repeat",
+        core_match
+            .file
+            .as_ref()
+            .map(|file| file.count as f32)
+            .unwrap_or(0.0),
+    );
+    scores.insert(
+        "prompt_repeat",
+        core_match
+            .prompt
+            .as_ref()
+            .map(|prompt| prompt.count as f32)
+            .unwrap_or(0.0),
+    );
     scores.insert(
         "low_progress",
         if core_match.low_progress { 1.0 } else { 0.0 },
     );
+    if !prompt_evidence.is_empty() {
+        scores.insert("prompt_refs", prompt_evidence.len() as f32);
+    }
 
     Finding {
         finding_type: FindingType::SingleAgentDeadloop,
@@ -284,10 +345,19 @@ fn deadloop_finding(
         agent_id: Some(binding.agent_id.hex()),
         reason_code: "deadloop_core_no_progress",
         summary: format!(
-            "session stuck in a {}s loop: {} connects, {} repeated file accesses",
+            "session stuck in a {}s loop: {} connects, {} repeated file accesses, {} repeated prompts",
             defaults::DEADLOOP_WINDOW_S,
-            core_match.connect_count,
-            core_match.file_count
+            core_match
+                .connect
+                .as_ref()
+                .map(|connect| connect.count)
+                .unwrap_or(0),
+            core_match.file.as_ref().map(|file| file.count).unwrap_or(0),
+            core_match
+                .prompt
+                .as_ref()
+                .map(|prompt| prompt.count)
+                .unwrap_or(0)
         ),
         process_comm: event.process.comm.clone(),
         process_binary: event.process.exe.clone(),
@@ -303,9 +373,7 @@ fn deadloop_finding(
             argv: event.process.argv.clone(),
         },
         evidence,
-        health: FindingHealth {
-            visibility_state: VisibilityState::Full,
-        },
+        health: FindingHealth::full(),
         component_scores: scores,
     }
 }

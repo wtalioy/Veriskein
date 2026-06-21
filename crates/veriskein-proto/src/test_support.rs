@@ -1,7 +1,7 @@
 use crate::{
-    DropReason, EventHeader, EventKind, FdDupEvent, FileOpenEvent, FileRenameEvent,
-    FileUnlinkEvent, MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent, ProcExitEvent,
-    ProcForkEvent, defaults,
+    ContentChannel, ContentDirection, ContentFragEvent, DropReason, EventHeader, EventKind,
+    FdDupEvent, FileOpenEvent, FileRenameEvent, FileUnlinkEvent, MetaDropEvent, NetConnectEvent,
+    ProcChdirEvent, ProcExecEvent, ProcExitEvent, ProcForkEvent, defaults,
 };
 
 #[derive(Debug, Clone)]
@@ -180,6 +180,32 @@ impl EventFixture {
             reason: reason as u8,
             _reserved: [0; 7],
         };
+        as_vec(&event)
+    }
+
+    pub fn content_frag(
+        &self,
+        ssl_ctx: u64,
+        stream_offset: u64,
+        channel: ContentChannel,
+        direction: ContentDirection,
+        data: &[u8],
+        truncated: bool,
+    ) -> Vec<u8> {
+        let mut event = ContentFragEvent {
+            header: self.header(EventKind::ContentFrag, 0),
+            ssl_ctx,
+            stream_offset,
+            byte_len: data.len() as u32 + u32::from(truncated),
+            frag_len: data.len().min(defaults::CONTENT_INLINE_MAX) as u32,
+            channel: channel as u8,
+            direction: direction as u8,
+            flags: u16::from(truncated),
+            _reserved: 0,
+            data: [0; defaults::CONTENT_INLINE_MAX],
+        };
+        let len = data.len().min(event.data.len());
+        event.data[..len].copy_from_slice(&data[..len]);
         as_vec(&event)
     }
 

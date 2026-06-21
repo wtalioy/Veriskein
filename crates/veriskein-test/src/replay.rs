@@ -7,7 +7,9 @@ use serde::Deserialize;
 use veriskein_alert::{AlertRecord, emit_ndjson_line, validate};
 use veriskein_detectors::DetectorEngine;
 use veriskein_graph::{AgentConfig, EnvEvidence, GraphState, LlmEndpointResolver};
-use veriskein_normalizer::{Normalizer, ProcessSnapshot, SensitiveConfig, load_workspaces};
+use veriskein_normalizer::{
+    Normalizer, ProcessSnapshot, SensitiveConfig, load_workspaces, path_basename,
+};
 use veriskein_proto::{EventFixture, OwnedEvent, parse};
 use veriskein_state_net::StateNet;
 
@@ -81,10 +83,7 @@ pub(crate) fn replay_fixture(
 ) -> Result<()> {
     let sensitive = SensitiveConfig::load(&config_root.join("config/sensitive.toml"))?;
     let agent_config = AgentConfig::load(&config_root.join("config/agents.toml"))?;
-    let mut workspace_inputs = workspace_inputs.to_vec();
-    if workspace_inputs.is_empty() && !agent_config.default_workspace.is_empty() {
-        workspace_inputs.push(agent_config.default_workspace.clone().into());
-    }
+    let workspace_inputs = agent_config.workspace_inputs_with_default(workspace_inputs);
     if workspace_inputs.is_empty() {
         bail!("replay requires at least one --workspace or config/agents.toml default_workspace");
     }
@@ -261,11 +260,7 @@ fn default_comm(comm: &str, fallback: &str) -> String {
     if !comm.is_empty() {
         return comm.to_string();
     }
-    Path::new(fallback)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(fallback)
-        .to_string()
+    path_basename(fallback).to_string()
 }
 
 fn default_ret_fd() -> i32 {

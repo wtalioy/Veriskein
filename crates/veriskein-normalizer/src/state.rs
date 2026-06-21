@@ -46,6 +46,26 @@ pub struct PathContext {
     pub sensitive_severity: Option<String>,
 }
 
+impl PathContext {
+    pub fn preferred_path(&self) -> &Path {
+        self.resolution
+            .canonical
+            .as_deref()
+            .unwrap_or(self.resolution.lexical.as_path())
+    }
+
+    pub fn preferred_path_string(&self) -> String {
+        self.preferred_path().display().to_string()
+    }
+}
+
+pub fn path_basename(path: &str) -> &str {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProcessSnapshot {
     pub pid: u32,
@@ -175,7 +195,9 @@ mod tests {
 
     use crate::config::{SensitiveConfig, load_workspaces};
 
-    use super::{NormalizedData, Normalizer, PathResolutionMode, PathVerdict};
+    use super::{
+        NormalizedData, Normalizer, PathContext, PathResolution, PathResolutionMode, PathVerdict,
+    };
 
     fn normalizer() -> Normalizer {
         let sensitive = SensitiveConfig::from_toml_str(
@@ -200,6 +222,43 @@ severity = "high"
 
     fn exec(seq: u64, pid: u32) -> OwnedEvent {
         parse_owned(fixture(seq, pid).exec("/usr/bin/claude", &["claude"]))
+    }
+
+    fn path_context(lexical: &str, canonical: Option<&str>) -> PathContext {
+        PathContext {
+            resolution: PathResolution {
+                lexical: lexical.into(),
+                canonical: canonical.map(Into::into),
+                mode: if canonical.is_some() {
+                    PathResolutionMode::Canonicalized
+                } else {
+                    PathResolutionMode::LexicalOnly
+                },
+                verdict: if canonical.is_some() {
+                    PathVerdict::CanonicalTrusted
+                } else {
+                    PathVerdict::LexicalTrusted
+                },
+                freshness_ns: 0,
+            },
+            workspace: None,
+            sensitive_rule: None,
+            sensitive_severity: None,
+        }
+    }
+
+    #[test]
+    fn preferred_path_uses_canonical_when_available() {
+        let context = path_context("/tmp/link", Some("/real/target"));
+        assert_eq!(context.preferred_path(), Path::new("/real/target"));
+        assert_eq!(context.preferred_path_string(), "/real/target");
+    }
+
+    #[test]
+    fn preferred_path_falls_back_to_lexical() {
+        let context = path_context("/tmp/lexical", None);
+        assert_eq!(context.preferred_path(), Path::new("/tmp/lexical"));
+        assert_eq!(context.preferred_path_string(), "/tmp/lexical");
     }
 
     #[test]

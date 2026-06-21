@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -28,5 +28,13 @@ impl AgentConfig {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read agents config {}", path.display()))?;
         toml::from_str(&text).context("parse agents toml")
+    }
+
+    pub fn workspace_inputs_with_default(&self, inputs: &[PathBuf]) -> Vec<PathBuf> {
+        let mut out = inputs.to_vec();
+        if out.is_empty() && !self.default_workspace.is_empty() {
+            out.push(self.default_workspace.clone().into());
+        }
+        out
     }
 }

@@ -6,7 +6,7 @@ mod schema;
 mod tests;
 
 pub use record::{
-    AlertEvidence, AlertFallback, AlertObjects, AlertPolicy, AlertRecord, emit_ndjson_line,
-    stdout_sink,
+    AlertCapture, AlertEvidence, AlertFallback, AlertObjects, AlertPolicy, AlertRecord,
+    emit_ndjson_line, stdout_sink,
 };
 pub use schema::{sample_alert_value, validate, validator};

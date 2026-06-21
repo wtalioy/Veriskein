@@ -1,25 +1,20 @@
 use std::collections::BTreeMap;
-use std::path::Path;
-
 use veriskein_graph::{Attribution, GraphState};
-use veriskein_normalizer::{NormalizedData, NormalizedEvent, PathResolutionMode};
+use veriskein_normalizer::{NormalizedData, NormalizedEvent, PathResolutionMode, path_basename};
 
-use crate::finding::{
-    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, VisibilityState,
-};
+use crate::finding::{Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType};
 use crate::signals::DetectorSignal;
 
 pub(crate) fn detect_unexpected_shell(
     event: &NormalizedEvent,
     graph: &GraphState,
-    binding: Option<&Attribution>,
+    binding: &Attribution,
 ) -> Option<Finding> {
-    let binding = session_binding(binding)?;
     let (filename, argv) = match &event.data {
         NormalizedData::ProcExec { filename, argv } => (filename, argv),
         _ => return None,
     };
-    let shell_name = basename(filename);
+    let shell_name = path_basename(filename);
     if !matches!(shell_name, "sh" | "bash" | "zsh" | "dash" | "fish") {
         return None;
     }
@@ -46,10 +41,9 @@ pub(crate) fn detect_unexpected_shell(
 pub(crate) fn detect_sensitive_file_access(
     event: &NormalizedEvent,
     graph: &GraphState,
-    binding: Option<&Attribution>,
+    binding: &Attribution,
     signals: &[DetectorSignal],
 ) -> Option<Finding> {
-    let binding = session_binding(binding)?;
     let (path_ctx, ret_fd) = match &event.data {
         NormalizedData::FileOpen { path, ret_fd, .. } => (path, *ret_fd),
         _ => return None,
@@ -94,10 +88,9 @@ pub(crate) fn detect_sensitive_file_access(
 pub(crate) fn detect_out_of_workspace_deletion(
     event: &NormalizedEvent,
     graph: &GraphState,
-    binding: Option<&Attribution>,
+    binding: &Attribution,
     signals: &[DetectorSignal],
 ) -> Option<Finding> {
-    let binding = session_binding(binding)?;
     let mutation = signals.iter().find_map(|signal| match signal {
         DetectorSignal::OutOfWorkspaceMutation(mutation) => Some(mutation),
         _ => None,
@@ -129,9 +122,8 @@ pub(crate) fn detect_out_of_workspace_deletion(
 
 pub(crate) fn detect_exec_observed(
     event: &NormalizedEvent,
-    binding: Option<&Attribution>,
+    binding: &Attribution,
 ) -> Option<Finding> {
-    let binding = session_binding(binding)?;
     let (filename, argv) = match &event.data {
         NormalizedData::ProcExec { filename, argv } => (filename, argv),
         _ => return None,
@@ -151,19 +143,8 @@ pub(crate) fn detect_exec_observed(
     ))
 }
 
-pub(crate) fn session_binding(binding: Option<&Attribution>) -> Option<&Attribution> {
-    binding.filter(|binding| binding.is_confirmed())
-}
-
 fn allowlisted(globs: &veriskein_normalizer::GlobList, value: &str) -> bool {
     globs.is_match(value)
-}
-
-fn basename(path: &str) -> &str {
-    Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(path)
 }
 
 struct PathFindingInput {
@@ -200,18 +181,13 @@ fn path_finding(
             event_ids: vec![event.event_id.clone()],
             argv: input.argv,
         },
-        evidence: vec![FindingEvidence {
-            kind: input.evidence_kind,
-            event_id: event.event_id.clone(),
-            ingest_seq: event.ingest_seq,
-            path: Some(input.path),
-            ip: None,
-            port: None,
-            note: input.evidence_note,
-        }],
-        health: FindingHealth {
-            visibility_state: VisibilityState::Full,
-        },
+        evidence: vec![FindingEvidence::path_event(
+            input.evidence_kind,
+            event,
+            input.path,
+            input.evidence_note,
+        )],
+        health: FindingHealth::full(),
         component_scores: BTreeMap::new(),
     }
 }

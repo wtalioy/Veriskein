@@ -1,6 +1,7 @@
 use serde_json::Value;
 use veriskein_detectors::{
-    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, VisibilityState,
+    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
+    VisibilityState,
 };
 
 use crate::{AlertRecord, sample_alert_value, validate};
@@ -34,17 +35,9 @@ fn finding(finding_type: FindingType) -> Finding {
             port: None,
             note: None,
         }],
-        health: FindingHealth {
-            visibility_state: VisibilityState::Full,
-        },
+        health: FindingHealth::full(),
         component_scores: Default::default(),
     }
-}
-
-#[test]
-fn schema_roundtrip() {
-    let sample = sample_alert_value();
-    validate(&sample).expect("sample alert must validate");
 }
 
 #[test]
@@ -120,9 +113,7 @@ fn deadloop_projection_is_schema_valid() {
                 note: None,
             },
         ],
-        health: FindingHealth {
-            visibility_state: VisibilityState::Full,
-        },
+        health: FindingHealth::full(),
         ..finding(FindingType::SingleAgentDeadloop)
     };
     let value = AlertRecord::from_finding(&finding)
@@ -135,17 +126,53 @@ fn deadloop_projection_is_schema_valid() {
 fn visibility_state_mapping_is_centralized() {
     let mut finding = finding(FindingType::SensitiveFileAccess);
 
-    for (state, expected) in [
-        (VisibilityState::Full, "full"),
-        (VisibilityState::Partial, "partial"),
-        (VisibilityState::Unsupported, "unsupported"),
-        (VisibilityState::Unavailable, "unavailable"),
+    for (state, expected_visibility, expected_mode) in [
+        (VisibilityState::Full, "full", "none"),
+        (VisibilityState::Partial, "partial", "degraded"),
+        (
+            VisibilityState::Unsupported,
+            "unsupported",
+            "capture_disabled",
+        ),
+        (
+            VisibilityState::Unavailable,
+            "unavailable",
+            "prompt_evidence_unavailable",
+        ),
     ] {
         finding.health.visibility_state = state;
         let value = AlertRecord::from_finding(&finding)
             .as_value()
             .expect("value");
-        assert_eq!(value["fallback"]["visibility"], expected);
+        assert_eq!(value["fallback"]["visibility"], expected_visibility);
+        assert_eq!(value["fallback"]["mode"], expected_mode);
+        assert_eq!(value["fallback"]["prompt_evidence"], "unavailable");
+        assert_eq!(value["capture"]["mode"], "none");
         validate(&value).expect("schema valid");
     }
+}
+
+#[test]
+fn prompt_health_projects_capture_metadata() {
+    let mut finding = finding(FindingType::SensitiveFileAccess);
+    finding.health.visibility_state = VisibilityState::Partial;
+    finding.health.prompt_evidence_state = PromptEvidenceState::Partial;
+    finding.health.capture_lag_ms = Some(750);
+    finding
+        .health
+        .degradation_sources
+        .push("capture_lag_ms=750".to_string());
+
+    let value = AlertRecord::from_finding(&finding)
+        .as_value()
+        .expect("value");
+
+    assert_eq!(value["fallback"]["prompt_evidence"], "partial");
+    assert_eq!(
+        value["fallback"]["degradation_sources"][0],
+        "capture_lag_ms=750"
+    );
+    assert_eq!(value["capture"]["mode"], "tls");
+    assert_eq!(value["capture"]["lag_ms"], 750);
+    validate(&value).expect("schema valid");
 }

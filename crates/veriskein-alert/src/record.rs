@@ -3,7 +3,9 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
-use veriskein_detectors::{Finding, FindingEvidence, FindingObjects, FindingType};
+use veriskein_detectors::{
+    Finding, FindingEvidence, FindingObjects, FindingType, PromptEvidenceState, VisibilityState,
+};
 use veriskein_proto::defaults;
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +32,14 @@ pub struct AlertObjects {
 pub struct AlertFallback {
     pub mode: &'static str,
     pub visibility: &'static str,
+    pub prompt_evidence: &'static str,
+    pub degradation_sources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertCapture {
+    pub mode: &'static str,
+    pub lag_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +68,7 @@ pub struct AlertRecord {
     pub evidence: Vec<AlertEvidence>,
     pub fallback: AlertFallback,
     pub policy: AlertPolicy,
+    pub capture: AlertCapture,
 }
 
 impl AlertRecord {
@@ -94,18 +105,40 @@ impl AlertRecord {
             objects: AlertObjects::from(&finding.objects),
             evidence: finding.evidence.iter().map(AlertEvidence::from).collect(),
             fallback: AlertFallback {
-                mode: "none",
+                mode: fallback_mode(finding.health.visibility_state),
                 visibility,
+                prompt_evidence: finding.health.prompt_evidence_state.as_str(),
+                degradation_sources: finding.health.degradation_sources.clone(),
             },
             policy: AlertPolicy {
                 detector_version: 1,
                 policy_version: 1,
+            },
+            capture: AlertCapture {
+                mode: capture_mode(finding.health.prompt_evidence_state),
+                lag_ms: finding.health.capture_lag_ms,
             },
         }
     }
 
     pub fn as_value(&self) -> Result<Value> {
         serde_json::to_value(self).context("serialize alert record")
+    }
+}
+
+fn capture_mode(prompt_evidence_state: PromptEvidenceState) -> &'static str {
+    match prompt_evidence_state {
+        PromptEvidenceState::Available | PromptEvidenceState::Partial => "tls",
+        PromptEvidenceState::Unavailable => "none",
+    }
+}
+
+fn fallback_mode(visibility_state: VisibilityState) -> &'static str {
+    match visibility_state {
+        VisibilityState::Full => "none",
+        VisibilityState::Partial => "degraded",
+        VisibilityState::Unsupported => "capture_disabled",
+        VisibilityState::Unavailable => "prompt_evidence_unavailable",
     }
 }
 
@@ -147,7 +180,7 @@ fn policy_for(finding_type: FindingType) -> (&'static str, &'static str, f32) {
     }
 }
 
-pub fn emit_ndjson_line<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<()> {
+pub fn emit_ndjson_line<W: Write + ?Sized, T: Serialize>(writer: &mut W, value: &T) -> Result<()> {
     // Flush per line so scenario assertions and streaming sinks observe alerts
     // promptly without depending on process teardown.
     serde_json::to_writer(&mut *writer, value).context("serialize ndjson line")?;

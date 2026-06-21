@@ -13,7 +13,13 @@ pub(super) struct PathCacheKey {
 }
 
 impl Normalizer {
-    pub fn resolve_path(&mut self, pid: u32, dirfd: i32, raw: &str, ts_ns: u64) -> PathContext {
+    pub(super) fn resolve_path(
+        &mut self,
+        pid: u32,
+        dirfd: i32,
+        raw: &str,
+        ts_ns: u64,
+    ) -> PathContext {
         let process = self.processes.get(&pid);
         let mount_ns = process.map(|proc| proc.mount_ns).unwrap_or(0);
         let base = self.lookup_base_path(process, dirfd);
@@ -36,7 +42,7 @@ impl Normalizer {
         self.path_context_from_resolution(resolution)
     }
 
-    pub fn workspace_of(&self, path: &Path) -> Option<&WorkspaceRef> {
+    fn workspace_of(&self, path: &Path) -> Option<&WorkspaceRef> {
         self.workspaces.iter().find(|ws| path.starts_with(&ws.root))
     }
 

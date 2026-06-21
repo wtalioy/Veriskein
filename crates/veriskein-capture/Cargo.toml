@@ -9,6 +9,12 @@ rust-version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+veriskein-bpf = { path = "../veriskein-bpf" }
+veriskein-graph = { path = "../veriskein-graph" }
+veriskein-proto = { path = "../veriskein-proto" }
+
 [lints]
 workspace = true
-
