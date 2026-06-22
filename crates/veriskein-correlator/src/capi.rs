@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use serde::Deserialize;
-use veriskein_proto::{AgentId, SessionId, VisibilityState};
+use veriskein_proto::{AgentId, SessionId, VisibilityState, defaults};
 
 use crate::{
     ArtifactInput, ArtifactStore, ChainInput, ChainRiskKind, CrossSessionMatchCandidate,
-    EvidenceChain, PromptSnapshot, PropagationFact, SourceArtifact, SourceLocator,
+    EvidenceChain, PromptSnapshot, PropagationFact, SourceArtifact, SourceLocator, SourceType,
     build_evidence_chain, gated_match_candidate,
 };
 
@@ -27,6 +27,8 @@ const DEFAULT_KEYWORDS: &[&str] = &[
     "leak the",
     "send to http",
 ];
+const TEMPLATE_MIN_NORMALIZED_CHARS: usize = 32;
+const TEMPLATE_LOW_ENTROPY_MAX: f32 = 3.8;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InjectionKeywordConfig {
@@ -105,16 +107,95 @@ struct CandidateEntry {
     prompt_ts_ns: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TemplateKey {
+    workspace: String,
+    source_type: SourceType,
+    norm_hash: [u8; 16],
+}
+
+#[derive(Debug, Clone)]
+struct TemplateEntry {
+    sessions: BTreeSet<SessionId>,
+    last_seen_ns: u64,
+    low_entropy: bool,
+    keyword_bearing: bool,
+}
+
+#[derive(Debug, Default)]
+struct TemplateSuppressor {
+    entries: BTreeMap<TemplateKey, TemplateEntry>,
+    order: VecDeque<TemplateKey>,
+}
+
+impl TemplateSuppressor {
+    fn observe(
+        &mut self,
+        artifact: &SourceArtifact,
+        prompt: &PromptSnapshot,
+        keywords: &[String],
+        ts_ns: u64,
+    ) {
+        let key = TemplateKey {
+            workspace: workspace_key(&artifact.source_locator),
+            source_type: artifact.source_type,
+            norm_hash: artifact.signature.hash_norm,
+        };
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        let normalized = &artifact.signature.normalized;
+        let entry = self.entries.entry(key).or_insert_with(|| TemplateEntry {
+            sessions: BTreeSet::new(),
+            last_seen_ns: ts_ns,
+            low_entropy: is_suppressible_template_shape(normalized),
+            keyword_bearing: hits_keyword(normalized, keywords),
+        });
+        entry.sessions.insert(artifact.origin_session);
+        entry.sessions.insert(prompt.session_id);
+        entry.last_seen_ns = ts_ns;
+        entry.low_entropy &= is_suppressible_template_shape(normalized);
+        entry.keyword_bearing |= hits_keyword(normalized, keywords);
+        self.prune(ts_ns);
+    }
+
+    fn should_suppress(&self, artifact: &SourceArtifact) -> bool {
+        let key = TemplateKey {
+            workspace: workspace_key(&artifact.source_locator),
+            source_type: artifact.source_type,
+            norm_hash: artifact.signature.hash_norm,
+        };
+        self.entries.get(&key).is_some_and(|entry| {
+            entry.sessions.len() >= 3 && entry.low_entropy && !entry.keyword_bearing
+        })
+    }
+
+    fn prune(&mut self, now_ns: u64) {
+        let ttl_ns = defaults::secs_to_ns(3600);
+        self.entries
+            .retain(|_, entry| entry.last_seen_ns.saturating_add(ttl_ns) >= now_ns);
+        self.order.retain(|key| self.entries.contains_key(key));
+        while self.entries.len() > defaults::MAX_TEMPLATE_IGNORE {
+            let Some(key) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&key);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CapiState {
     artifacts: ArtifactStore,
     latest_file_lineage: BTreeMap<String, FileLineage>,
     latest_file_lineage_order: VecDeque<String>,
-    pending_downstream_reads: BTreeMap<SessionId, Vec<PendingRead>>,
+    pending_downstream_reads: BTreeMap<SessionId, VecDeque<PendingRead>>,
+    pending_downstream_read_order: VecDeque<SessionId>,
+    pending_downstream_read_total: usize,
     candidates: BTreeMap<CandidateKey, CandidateEntry>,
     candidate_order: VecDeque<CandidateKey>,
     emitted_chains: BTreeSet<veriskein_proto::ChainId>,
     emitted_chain_order: VecDeque<veriskein_proto::ChainId>,
+    template_suppressor: TemplateSuppressor,
     keywords: InjectionKeywordConfig,
     evicted_detail_total: u64,
 }
@@ -184,11 +265,14 @@ impl CapiState {
         self.pending_downstream_reads
             .entry(input.session_id)
             .or_default()
-            .push(PendingRead {
+            .push_back(PendingRead {
                 artifact_id,
                 propagation_fact: propagation,
                 read_ts_ns: input.ts_ns,
             });
+        self.pending_downstream_read_order
+            .push_back(input.session_id);
+        self.pending_downstream_read_total = self.pending_downstream_read_total.saturating_add(1);
         self.enforce_bounds();
     }
 
@@ -196,10 +280,14 @@ impl CapiState {
         self.prune(prompt.ts_start);
         let max_age_ns = capi_window_ns();
         if let Some(pending) = self.pending_downstream_reads.get_mut(&prompt.session_id) {
+            let before = pending.len();
             pending.retain(|read| {
                 prompt.ts_start >= read.read_ts_ns
                     && prompt.ts_start.saturating_sub(read.read_ts_ns) <= max_age_ns
             });
+            self.pending_downstream_read_total = self
+                .pending_downstream_read_total
+                .saturating_sub(before.saturating_sub(pending.len()));
         }
         let pending = self
             .pending_downstream_reads
@@ -210,6 +298,15 @@ impl CapiState {
             let Some(artifact) = self.artifacts.get(read.artifact_id) else {
                 continue;
             };
+            self.template_suppressor.observe(
+                artifact,
+                &prompt,
+                &self.keywords.keywords,
+                prompt.ts_start,
+            );
+            if self.template_suppressor.should_suppress(artifact) {
+                continue;
+            }
             let Some(candidate) = gated_match_candidate(artifact, &prompt, read.propagation_fact)
             else {
                 continue;
@@ -296,10 +393,16 @@ impl CapiState {
     fn prune(&mut self, now_ns: u64) {
         let max_age_ns = capi_window_ns();
         for reads in self.pending_downstream_reads.values_mut() {
+            let before = reads.len();
             reads.retain(|read| read.read_ts_ns.saturating_add(max_age_ns) >= now_ns);
+            self.pending_downstream_read_total = self
+                .pending_downstream_read_total
+                .saturating_sub(before.saturating_sub(reads.len()));
         }
         self.pending_downstream_reads
             .retain(|_, reads| !reads.is_empty());
+        self.pending_downstream_read_order
+            .retain(|session_id| self.pending_downstream_reads.contains_key(session_id));
         self.candidates
             .retain(|_, entry| entry.prompt_ts_ns.saturating_add(max_age_ns) >= now_ns);
         self.enforce_bounds();
@@ -314,38 +417,24 @@ impl CapiState {
                 self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
             }
         }
-        let mut pending_total = self
-            .pending_downstream_reads
-            .values()
-            .map(Vec::len)
-            .sum::<usize>();
-        while pending_total > veriskein_proto::defaults::MAX_ARTIFACTS {
-            let Some(session_id) = self
-                .pending_downstream_reads
-                .iter_mut()
-                .min_by_key(|(_, reads)| {
-                    reads
-                        .first()
-                        .map(|read| read.read_ts_ns)
-                        .unwrap_or(u64::MAX)
-                })
-                .and_then(|(session_id, reads)| {
-                    if reads.is_empty() {
-                        None
-                    } else {
-                        reads.remove(0);
-                        Some(*session_id)
-                    }
-                })
-            else {
+        while self.pending_downstream_read_total > veriskein_proto::defaults::MAX_ARTIFACTS {
+            let Some(session_id) = self.pending_downstream_read_order.pop_front() else {
                 break;
             };
-            pending_total = pending_total.saturating_sub(1);
+            let Some(reads) = self.pending_downstream_reads.get_mut(&session_id) else {
+                continue;
+            };
+            if reads.pop_front().is_none() {
+                self.pending_downstream_reads.remove(&session_id);
+                continue;
+            }
+            self.pending_downstream_read_total =
+                self.pending_downstream_read_total.saturating_sub(1);
             self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
             if self
                 .pending_downstream_reads
                 .get(&session_id)
-                .is_some_and(Vec::is_empty)
+                .is_some_and(VecDeque::is_empty)
             {
                 self.pending_downstream_reads.remove(&session_id);
             }
@@ -373,12 +462,52 @@ fn capi_window_ns() -> u64 {
     veriskein_proto::defaults::ms_to_ns(veriskein_proto::defaults::CAPI_WINDOW_MS)
 }
 
+fn workspace_key(locator: &SourceLocator) -> String {
+    match locator {
+        SourceLocator::WorkspaceFile { path } => path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.to_string())
+            .unwrap_or_default(),
+    }
+}
+
+fn hits_keyword(normalized: &str, keywords: &[String]) -> bool {
+    keywords.iter().any(|keyword| {
+        let normalized_keyword = crate::normalize_text(keyword.as_bytes());
+        !normalized_keyword.is_empty() && normalized.contains(&normalized_keyword)
+    })
+}
+
+fn normalized_entropy(text: &str) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let mut counts = BTreeMap::<char, u32>::new();
+    for ch in text.chars() {
+        *counts.entry(ch).or_default() += 1;
+    }
+    let len = text.chars().count() as f32;
+    counts
+        .values()
+        .map(|count| {
+            let p = *count as f32 / len;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+fn is_suppressible_template_shape(normalized: &str) -> bool {
+    normalized.chars().count() >= TEMPLATE_MIN_NORMALIZED_CHARS
+        && normalized_entropy(normalized) < TEMPLATE_LOW_ENTROPY_MAX
+}
+
 #[cfg(test)]
 mod tests {
     use veriskein_proto::{ContentChannel, SessionId, VisibilityState};
 
     use crate::{
-        CapiState, ChainRiskKind, FileEventInput, InjectionKeywordConfig, PromptInput, PromptStore,
+        ArtifactInput, ArtifactStore, CapiState, ChainRiskKind, FileEventInput,
+        InjectionKeywordConfig, PromptInput, PromptStore, SourceLocator,
     };
 
     #[test]
@@ -569,5 +698,126 @@ mod tests {
 
         assert_eq!(chains.len(), 1);
         assert_eq!(chains[0].match_score, 0.40);
+    }
+
+    #[test]
+    fn template_suppression_ignores_keyword_bearing_lineage() {
+        let template = b"standard instructions include /etc/shadow";
+        let mut artifacts = ArtifactStore::default();
+        let artifact_id = artifacts.insert_file_excerpt(ArtifactInput {
+            origin_session: SessionId::from_seed(b"upstream"),
+            origin_agent: None,
+            origin_process: 1,
+            source_locator: SourceLocator::WorkspaceFile {
+                path: "/tmp/ws/report.md".to_string(),
+            },
+            ts_ns: 10,
+            excerpt: template.to_vec(),
+            visibility_state: VisibilityState::Full,
+        });
+        let artifact = artifacts.get(artifact_id).expect("artifact");
+        let mut prompts = PromptStore::default();
+        let prompt_id = prompts.insert(PromptInput {
+            session_id: SessionId::from_seed(b"downstream"),
+            agent_id: None,
+            stream_id: 1,
+            capture_mode: ContentChannel::Tls,
+            ts_start: 20,
+            ts_end: 20,
+            excerpt: template.to_vec(),
+            visibility_state: VisibilityState::Full,
+            degraded: false,
+        });
+        let prompt = prompts.snapshot(prompt_id).expect("prompt");
+        let mut suppressor = super::TemplateSuppressor::default();
+        let keywords = InjectionKeywordConfig::default().keywords;
+
+        for seed in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
+            let mut prompt = prompt.clone();
+            prompt.session_id = SessionId::from_seed(seed);
+            suppressor.observe(artifact, &prompt, &keywords, prompt.ts_start);
+        }
+
+        assert!(!suppressor.should_suppress(artifact));
+    }
+
+    #[test]
+    fn repeated_low_entropy_template_is_suppressed() {
+        let template = b"boilerplate boilerplate boilerplate boilerplate";
+        let mut artifacts = ArtifactStore::default();
+        let artifact_id = artifacts.insert_file_excerpt(ArtifactInput {
+            origin_session: SessionId::from_seed(b"upstream"),
+            origin_agent: None,
+            origin_process: 1,
+            source_locator: SourceLocator::WorkspaceFile {
+                path: "/tmp/ws/report.md".to_string(),
+            },
+            ts_ns: 10,
+            excerpt: template.to_vec(),
+            visibility_state: VisibilityState::Full,
+        });
+        let artifact = artifacts.get(artifact_id).expect("artifact");
+        let mut prompts = PromptStore::default();
+        let prompt_id = prompts.insert(PromptInput {
+            session_id: SessionId::from_seed(b"downstream"),
+            agent_id: None,
+            stream_id: 1,
+            capture_mode: ContentChannel::Tls,
+            ts_start: 20,
+            ts_end: 20,
+            excerpt: template.to_vec(),
+            visibility_state: VisibilityState::Full,
+            degraded: false,
+        });
+        let prompt = prompts.snapshot(prompt_id).expect("prompt");
+        let mut suppressor = super::TemplateSuppressor::default();
+
+        for seed in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
+            let mut prompt = prompt.clone();
+            prompt.session_id = SessionId::from_seed(seed);
+            suppressor.observe(artifact, &prompt, &[], prompt.ts_start);
+        }
+
+        assert!(suppressor.should_suppress(artifact));
+    }
+
+    #[test]
+    fn short_low_entropy_handoff_is_not_template_suppressed() {
+        let text = b"run sh";
+        let mut artifacts = ArtifactStore::default();
+        let artifact_id = artifacts.insert_file_excerpt(ArtifactInput {
+            origin_session: SessionId::from_seed(b"upstream"),
+            origin_agent: None,
+            origin_process: 1,
+            source_locator: SourceLocator::WorkspaceFile {
+                path: "/tmp/ws/report.md".to_string(),
+            },
+            ts_ns: 10,
+            excerpt: text.to_vec(),
+            visibility_state: VisibilityState::Full,
+        });
+        let artifact = artifacts.get(artifact_id).expect("artifact");
+        let mut prompts = PromptStore::default();
+        let prompt_id = prompts.insert(PromptInput {
+            session_id: SessionId::from_seed(b"downstream"),
+            agent_id: None,
+            stream_id: 1,
+            capture_mode: ContentChannel::Tls,
+            ts_start: 20,
+            ts_end: 20,
+            excerpt: text.to_vec(),
+            visibility_state: VisibilityState::Full,
+            degraded: false,
+        });
+        let prompt = prompts.snapshot(prompt_id).expect("prompt");
+        let mut suppressor = super::TemplateSuppressor::default();
+
+        for seed in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
+            let mut prompt = prompt.clone();
+            prompt.session_id = SessionId::from_seed(seed);
+            suppressor.observe(artifact, &prompt, &[], prompt.ts_start);
+        }
+
+        assert!(!suppressor.should_suppress(artifact));
     }
 }

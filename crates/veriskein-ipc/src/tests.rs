@@ -13,6 +13,11 @@ fn round_trips_hello_frame_as_ndjson() {
 
     assert!(encoded.ends_with('\n'));
     assert_eq!(encoded.lines().count(), 1);
+    let value: serde_json::Value = serde_json::from_str(encoded.trim()).expect("json");
+    assert_eq!(value["kind"], "hello");
+    assert_eq!(value["subscribe"], json!(["alerts"]));
+    assert!(value.get("topic").is_none());
+    assert!(value.get("payload").is_none());
     assert_eq!(decode_ndjson(&encoded).expect("decode frame"), frame);
 }
 
@@ -23,7 +28,13 @@ fn round_trips_welcome_frame_with_default_queue_policy() {
 
     let frame = IpcFrame::Welcome(welcome);
     let decoded = decode_ndjson(&encode_ndjson(&frame).expect("encode frame")).expect("decode");
+    let value: serde_json::Value =
+        serde_json::from_str(encode_ndjson(&frame).expect("encode frame").trim()).expect("json");
 
+    assert_eq!(value["kind"], "welcome");
+    assert_eq!(value["run_id"], "unknown");
+    assert_eq!(value["schema"]["alert"], SCHEMA_VERSION);
+    assert_eq!(value["schema"]["metrics"], SCHEMA_VERSION);
     assert_eq!(decoded, frame);
     assert_eq!(QueuePolicy::default().events_capacity, IPC_EVENTS_QUEUE);
     assert_eq!(QueuePolicy::default().alerts_capacity, IPC_ALERTS_QUEUE);

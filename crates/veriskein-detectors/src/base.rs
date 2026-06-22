@@ -169,7 +169,7 @@ fn path_finding(
         tid: event.process.tid,
         session_id: binding.session_id.hex(),
         agent_id: Some(binding.agent_id.hex()),
-        reason_code: input.reason_code,
+        reason_code: input.reason_code.to_string(),
         summary: input.summary,
         process_comm: event.process.comm.clone(),
         process_binary: event.process.exe.clone(),
@@ -182,7 +182,8 @@ fn path_finding(
         },
         evidence: vec![FindingEvidence::path_event(
             input.evidence_kind,
-            event,
+            event.event_id.clone(),
+            event.ingest_seq,
             input.path,
             input.evidence_note,
         )],

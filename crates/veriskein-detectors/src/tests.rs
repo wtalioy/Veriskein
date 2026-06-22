@@ -7,6 +7,8 @@ use veriskein_proto::{EventKind, defaults};
 
 use veriskein_correlator::{PromptEvidence, PromptEvidenceKind};
 
+use crate::deadloop::DeadloopDetector;
+use crate::signals::materialize_signals;
 use crate::{DetectorEngine, FindingType};
 
 const TEST_PID: u32 = 10;
@@ -422,6 +424,41 @@ fn deadloop_uses_session_cooldown() {
             .count();
     }
     assert_eq!(count, 1);
+}
+
+#[test]
+fn deadloop_prunes_expired_sessions_and_cooldowns() {
+    let graph = graph();
+    let binding = graph.resolve(TEST_PID).expect("binding");
+    let mut detector = DeadloopDetector::default();
+    let mut count = 0;
+
+    for seq in 1..=90 {
+        let event = if seq <= 60 {
+            net_connect_event(seq, TEST_PID, "127.0.0.1", 443)
+        } else {
+            file_open_event(seq, TEST_PID, "/tmp/loopfile")
+        };
+        let signals = materialize_signals(&event, binding);
+        if detector
+            .apply(&event, binding, &signals, &[])
+            .is_some_and(|finding| finding.finding_type == FindingType::SingleAgentDeadloop)
+        {
+            count += 1;
+        }
+    }
+
+    assert_eq!(count, 1);
+    assert_eq!(detector.tracked_session_count(), 1);
+    assert_eq!(detector.cooldown_count(), 1);
+
+    detector.prune_expired(
+        defaults::secs_to_ns(defaults::DEADLOOP_ALERT_COOLDOWN_S + defaults::DEADLOOP_WINDOW_S + 1),
+        defaults::secs_to_ns(defaults::DEADLOOP_WINDOW_S),
+    );
+
+    assert_eq!(detector.tracked_session_count(), 0);
+    assert_eq!(detector.cooldown_count(), 0);
 }
 
 #[test]

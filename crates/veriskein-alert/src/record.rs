@@ -4,10 +4,10 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
-use veriskein_detectors::{
+use veriskein_proto::defaults;
+use veriskein_proto::{
     Finding, FindingEvidence, FindingObjects, FindingType, PromptEvidenceState, VisibilityState,
 };
-use veriskein_proto::defaults;
 
 pub const DEGRADATION_SOURCE_RINGBUF_DROP_RATE: &str = "ringbuf_drop_rate";
 pub const DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF: &str = "configured_small_ringbuf";
@@ -128,11 +128,18 @@ pub struct AlertRecord {
 }
 
 impl AlertRecord {
-    pub fn from_finding(finding: &Finding) -> Self {
-        Self::from_finding_with_health(finding, &RuntimeHealth::full())
+    pub fn try_from_finding(finding: &Finding) -> Option<Self> {
+        Self::try_from_finding_with_health(finding, &RuntimeHealth::full())
     }
 
-    pub fn from_finding_with_health(finding: &Finding, runtime: &RuntimeHealth) -> Self {
+    pub fn try_from_finding_with_health(
+        finding: &Finding,
+        runtime: &RuntimeHealth,
+    ) -> Option<Self> {
+        valid_finding(finding).then(|| Self::build_from_finding_with_health(finding, runtime))
+    }
+
+    fn build_from_finding_with_health(finding: &Finding, runtime: &RuntimeHealth) -> Self {
         let (severity, confidence_band, confidence_score) = policy_for(finding, runtime);
         let visibility_state = combined_visibility(finding.health.visibility_state, runtime);
         let visibility = visibility_state.as_str();
@@ -262,7 +269,9 @@ fn policy_for(finding: &Finding, runtime: &RuntimeHealth) -> (&'static str, &'st
                 .copied()
                 .unwrap_or(0.0)
                 .clamp(0.0, 1.0);
-            if score >= defaults::CAPI_SCORE_THRESHOLD {
+            if finding.reason_code == "capi_cross_session_weak_match" {
+                ("high", "medium", score.min(0.79))
+            } else if score >= defaults::CAPI_SCORE_THRESHOLD {
                 ("critical", "strong", score)
             } else {
                 ("high", "medium", score)
@@ -342,12 +351,30 @@ struct ThrottleEntry {
     merged_event_ids: Vec<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AlertThrottler {
     entries: BTreeMap<String, ThrottleEntry>,
+    max_entries: usize,
+}
+
+impl Default for AlertThrottler {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            max_entries: defaults::MAX_ALERT_THROTTLE_ENTRIES,
+        }
+    }
 }
 
 impl AlertThrottler {
+    #[cfg(test)]
+    pub(crate) fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            max_entries,
+            ..Self::default()
+        }
+    }
+
     pub fn project(&mut self, finding: &Finding) -> Option<AlertRecord> {
         self.project_with_health(finding, &RuntimeHealth::full())
     }
@@ -357,11 +384,7 @@ impl AlertThrottler {
         finding: &Finding,
         runtime: &RuntimeHealth,
     ) -> Option<AlertRecord> {
-        if !valid_finding(finding) {
-            debug_assert!(false, "malformed finding rejected before alert projection");
-            return None;
-        }
-        let mut alert = AlertRecord::from_finding_with_health(finding, runtime);
+        let mut alert = AlertRecord::try_from_finding_with_health(finding, runtime)?;
         let key = throttle_key(&alert);
         let window_ns = defaults::secs_to_ns(defaults::ALERT_DEDUP_SECS);
         self.entries.retain(|entry_key, entry| {
@@ -375,6 +398,7 @@ impl AlertThrottler {
                     merged_event_ids: Vec::new(),
                 },
             );
+            self.prune_capacity();
             return Some(alert);
         };
         if alert.ts_ns.saturating_sub(entry.first_alert.ts_ns) < window_ns {
@@ -403,6 +427,20 @@ impl AlertThrottler {
         entry.first_alert = alert.clone();
         Some(alert)
     }
+
+    fn prune_capacity(&mut self) {
+        while self.entries.len() > self.max_entries {
+            let Some(key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.first_alert.ts_ns)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&key);
+        }
+    }
 }
 
 fn valid_finding(finding: &Finding) -> bool {
@@ -416,13 +454,14 @@ fn valid_finding(finding: &Finding) -> bool {
         FindingType::SingleAgentDeadloop => finding
             .evidence
             .iter()
-            .any(|evidence| matches!(evidence.kind, "net_connect" | "file_access")),
+            .any(|evidence| matches!(evidence.kind.as_str(), "net_connect" | "file_access")),
         FindingType::CrossAgentPromptInjection => {
             finding
                 .objects
                 .chain_id
                 .as_deref()
                 .is_some_and(|id| !id.is_empty())
+                && finding.health.prompt_evidence_state != PromptEvidenceState::Unavailable
                 && !finding.objects.prompt_ids.is_empty()
                 && !finding.objects.artifact_ids.is_empty()
                 && finding
@@ -444,10 +483,13 @@ fn valid_finding(finding: &Finding) -> bool {
 
 fn throttle_key(alert: &AlertRecord) -> String {
     format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}:{}:{}",
         alert.session_id,
         alert.alert_type,
         alert.reason_code,
+        alert.fallback.mode,
+        alert.policy.detector_version,
+        alert.policy.policy_version,
         alert
             .objects
             .chain_id

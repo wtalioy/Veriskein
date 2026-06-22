@@ -6,7 +6,7 @@ use veriskein_proto::{AgentId, ArtifactId, SessionId, VisibilityState, defaults}
 use crate::matching::{ContentSignature, hex16};
 use crate::{RedactionMode, redact_excerpt};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum SourceType {
     FileExcerpt,
 }

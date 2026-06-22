@@ -35,6 +35,12 @@ pub enum PropagationFact {
     },
 }
 
+impl PropagationFact {
+    pub fn is_explicit(&self) -> bool {
+        matches!(self, Self::WorkspaceFileLineage { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CrossSessionMatchCandidate {
     pub upstream_session: SessionId,

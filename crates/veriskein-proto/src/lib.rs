@@ -5,6 +5,7 @@
 pub mod defaults;
 
 mod contracts;
+mod finding;
 mod kinds;
 mod net;
 mod owned;
@@ -17,6 +18,9 @@ mod wire;
 mod tests;
 
 pub use contracts::{DETECTOR_INPUTS, RECONCILERS, REGISTRY_OWNERS};
+pub use finding::{
+    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
+};
 pub use kinds::{ContentChannel, ContentDirection, DropReason, EventKind};
 pub use net::{AF_INET_RAW, AF_INET6_RAW, net_addr_from_raw, raw_net_addr};
 pub use owned::{

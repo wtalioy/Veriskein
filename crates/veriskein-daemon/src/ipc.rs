@@ -4,9 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -17,12 +17,14 @@ use veriskein_ipc::{
     AlertFrame, ErrorCode, ErrorFrame, HelloFrame, IpcFrame, MetricsFrame, MetricsSnapshot, Topic,
     WelcomeFrame, decode_ndjson_frame, encode_ndjson_frame,
 };
+use veriskein_proto::EventId;
 
 use veriskein_ipc::QueuePolicy;
 
 const SERVER_NAME: &str = "veriskein-daemon";
 const OWNER_ONLY_SOCKET_MODE: u32 = 0o600;
 const PEERCRED_FILTERED_SOCKET_MODE: u32 = 0o666;
+const MAX_IPC_FRAME_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct IpcSettings {
@@ -82,6 +84,8 @@ impl IpcServer {
             MetricsSnapshot::new(now_ns()),
         )));
         let connection_alerts = alerts_tx.clone();
+        let run_id =
+            EventId::from_seed(format!("{}:{}", std::process::id(), now_ns()).as_bytes()).hex();
         let handle = tokio::spawn(async move {
             loop {
                 match listener.accept().await {
@@ -89,9 +93,11 @@ impl IpcServer {
                         let alerts_rx = connection_alerts.subscribe();
                         let metrics_rx = metrics_rx.clone();
                         let settings = settings.clone();
+                        let run_id = run_id.clone();
                         tokio::spawn(async move {
                             if let Err(err) =
-                                serve_client(stream, alerts_rx, metrics_rx, &settings).await
+                                serve_client(stream, alerts_rx, metrics_rx, &settings, &run_id)
+                                    .await
                             {
                                 debug!("IPC client disconnected: {err:#}");
                             }
@@ -164,15 +170,26 @@ async fn serve_client(
     mut alerts_rx: broadcast::Receiver<IpcFrame>,
     mut metrics_rx: watch::Receiver<IpcFrame>,
     settings: &IpcSettings,
+    run_id: &str,
 ) -> Result<()> {
     ensure_peer_allowed(&stream, &settings.allow_uids)?;
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    let mut hello = String::new();
-    reader
-        .read_line(&mut hello)
-        .await
-        .context("read IPC hello")?;
+    let mut hello = Vec::new();
+    if let Err(err) = read_bounded_line(&mut reader, &mut hello, MAX_IPC_FRAME_BYTES).await {
+        write_error(
+            &mut write_half,
+            ErrorCode::DecodeError,
+            err.to_string(),
+            settings.client_slow_timeout_ms,
+        )
+        .await?;
+        return Ok(());
+    }
+    if hello.is_empty() {
+        return Ok(());
+    }
+    let hello = String::from_utf8(hello).context("decode IPC hello as utf-8")?;
     let subscriptions = match decode_ndjson_frame(&hello) {
         Ok(IpcFrame::Hello(frame)) => accepted_topics(&frame),
         Ok(_) => {
@@ -200,6 +217,7 @@ async fn serve_client(
     write_frame(
         &mut write_half,
         &IpcFrame::Welcome(WelcomeFrame {
+            run_id: run_id.to_string(),
             accepted_topics: subscriptions.clone(),
             queue_policy: settings.queue_policy(),
             ..WelcomeFrame::new(SERVER_NAME)
@@ -213,7 +231,7 @@ async fn serve_client(
         write_frame(&mut write_half, &frame, settings.client_slow_timeout_ms).await?;
     }
 
-    let mut client_line = String::new();
+    let mut client_line = Vec::new();
     loop {
         tokio::select! {
             alert = alerts_rx.recv(), if subscriptions.contains(&Topic::Alert) => {
@@ -238,12 +256,50 @@ async fn serve_client(
                 let frame = metrics_rx.borrow().clone();
                 write_frame(&mut write_half, &frame, settings.client_slow_timeout_ms).await?;
             }
-            line = reader.read_line(&mut client_line) => {
-                if line.unwrap_or(0) == 0 {
-                    return Ok(());
+            line = read_bounded_line(&mut reader, &mut client_line, MAX_IPC_FRAME_BYTES) => {
+                match line {
+                    Ok(0) => return Ok(()),
+                    Ok(_) => {}
+                    Err(err) => {
+                        write_error(
+                            &mut write_half,
+                            ErrorCode::DecodeError,
+                            err.to_string(),
+                            settings.client_slow_timeout_ms,
+                        ).await?;
+                        return Ok(());
+                    }
                 }
-                client_line.clear();
             }
+        }
+    }
+}
+
+async fn read_bounded_line<R>(reader: &mut R, out: &mut Vec<u8>, max_len: usize) -> Result<usize>
+where
+    R: AsyncBufRead + Unpin,
+{
+    out.clear();
+    loop {
+        let (take, has_newline) = {
+            let available = reader.fill_buf().await.context("read IPC frame")?;
+            if available.is_empty() {
+                return Ok(out.len());
+            }
+            let take = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|index| index + 1)
+                .unwrap_or(available.len());
+            if out.len().saturating_add(take) > max_len {
+                bail!("IPC frame exceeds {max_len} bytes");
+            }
+            out.extend_from_slice(&available[..take]);
+            (take, out.ends_with(b"\n"))
+        };
+        reader.consume(take);
+        if has_newline {
+            return Ok(out.len());
         }
     }
 }

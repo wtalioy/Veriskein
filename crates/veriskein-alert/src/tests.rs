@@ -1,9 +1,9 @@
 use serde_json::Value;
-use veriskein_detectors::{
+use veriskein_proto::defaults;
+use veriskein_proto::{
     Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
     VisibilityState,
 };
-use veriskein_proto::defaults;
 
 use crate::{
     AlertRecord, AlertThrottler, DEGRADATION_SOURCE_RINGBUF_DROP_RATE, RuntimeHealth,
@@ -18,7 +18,7 @@ fn finding(finding_type: FindingType) -> Finding {
         tid: 100,
         session_id: "00112233445566778899aabbccddeeff".to_string(),
         agent_id: Some("00112233445566778899aabbccddeeff".to_string()),
-        reason_code: "sensitive_file_open",
+        reason_code: "sensitive_file_open".to_string(),
         summary: "opened /etc/shadow".to_string(),
         process_comm: "claude".to_string(),
         process_binary: "/usr/bin/claude".to_string(),
@@ -30,7 +30,7 @@ fn finding(finding_type: FindingType) -> Finding {
             ..FindingObjects::default()
         },
         evidence: vec![FindingEvidence {
-            kind: "file_access",
+            kind: "file_access".to_string(),
             event_id: "deadbeef".to_string(),
             ingest_seq: 1,
             path: Some("/etc/shadow".to_string()),
@@ -58,7 +58,8 @@ fn malformed_payload_is_rejected() {
 #[test]
 fn finding_projection_is_schema_valid() {
     let finding = finding(FindingType::SensitiveFileAccess);
-    let value = AlertRecord::from_finding(&finding)
+    let value = AlertRecord::try_from_finding(&finding)
+        .expect("valid finding")
         .as_value()
         .expect("value");
     validate(&value).expect("schema valid");
@@ -83,7 +84,8 @@ fn visibility_state_mapping_is_centralized() {
         ),
     ] {
         finding.health.visibility_state = state;
-        let value = AlertRecord::from_finding(&finding)
+        let value = AlertRecord::try_from_finding(&finding)
+            .expect("valid finding")
             .as_value()
             .expect("value");
         assert_eq!(value["fallback"]["visibility"], expected_visibility);
@@ -104,7 +106,8 @@ fn prompt_health_projects_prompt_metadata() {
         .degradation_sources
         .push("prompt_excerpt_masked".to_string());
 
-    let value = AlertRecord::from_finding(&finding)
+    let value = AlertRecord::try_from_finding(&finding)
+        .expect("valid finding")
         .as_value()
         .expect("value");
 
@@ -121,7 +124,7 @@ fn prompt_health_projects_prompt_metadata() {
 fn runtime_pressure_degrades_alert_policy_once() {
     let finding = finding(FindingType::CrossAgentPromptInjection);
     let mut finding = finding;
-    finding.reason_code = "capi_cross_session_prompt_to_syscall";
+    finding.reason_code = "capi_cross_session_prompt_to_syscall".to_string();
     finding.summary = "cross-session prompt injection".to_string();
     finding.objects = FindingObjects {
         prompt_ids: vec!["00112233445566778899aabbccddeeff".to_string()],
@@ -134,7 +137,7 @@ fn runtime_pressure_degrades_alert_policy_once() {
     };
     finding.evidence = vec![
         FindingEvidence {
-            kind: "excerpt_match",
+            kind: "excerpt_match".to_string(),
             event_id: "22222233445566778899aabbccddeeff".to_string(),
             ingest_seq: 0,
             path: None,
@@ -147,7 +150,7 @@ fn runtime_pressure_degrades_alert_policy_once() {
             note: Some("exact".to_string()),
         },
         FindingEvidence {
-            kind: "prompt_ref",
+            kind: "prompt_ref".to_string(),
             event_id: "00112233445566778899aabbccddeeff".to_string(),
             ingest_seq: 0,
             path: None,
@@ -160,7 +163,7 @@ fn runtime_pressure_degrades_alert_policy_once() {
             note: Some("downstream_prompt".to_string()),
         },
         FindingEvidence {
-            kind: "syscall",
+            kind: "syscall".to_string(),
             event_id: "evt-risk".to_string(),
             ingest_seq: 1,
             path: None,
@@ -173,13 +176,16 @@ fn runtime_pressure_degrades_alert_policy_once() {
             note: Some("risky_action_after_prompt".to_string()),
         },
     ];
-    finding.component_scores.insert("causal_score", 0.90);
+    finding
+        .component_scores
+        .insert("causal_score".to_string(), 0.90);
     finding.health.prompt_evidence_state = PromptEvidenceState::Available;
 
-    let value = AlertRecord::from_finding_with_health(
+    let value = AlertRecord::try_from_finding_with_health(
         &finding,
         &RuntimeHealth::degraded("test_pressure", 0.02),
     )
+    .expect("valid finding")
     .as_value()
     .expect("value");
 
@@ -200,7 +206,7 @@ fn runtime_pressure_degrades_alert_policy_once() {
 #[test]
 fn capi_projection_is_schema_valid_and_strong() {
     let mut finding = finding(FindingType::CrossAgentPromptInjection);
-    finding.reason_code = "capi_cross_session_prompt_to_syscall";
+    finding.reason_code = "capi_cross_session_prompt_to_syscall".to_string();
     finding.summary = "cross-session prompt injection".to_string();
     finding.objects = FindingObjects {
         prompt_ids: vec!["00112233445566778899aabbccddeeff".to_string()],
@@ -211,24 +217,45 @@ fn capi_projection_is_schema_valid_and_strong() {
         downstream_session_id: Some("00112233445566778899aabbccddeeff".to_string()),
         ..FindingObjects::default()
     };
-    finding.evidence = vec![FindingEvidence {
-        kind: "excerpt_match",
-        event_id: "22222233445566778899aabbccddeeff".to_string(),
-        ingest_seq: 0,
-        path: None,
-        ip: None,
-        port: None,
-        score: Some(0.40),
-        src: Some("upstream".to_string()),
-        dst: Some("downstream".to_string()),
-        op: None,
-        note: Some("exact".to_string()),
-    }];
-    finding.component_scores.insert("causal_score", 0.90);
+    finding.evidence = vec![
+        FindingEvidence::chain_ref(
+            "excerpt_match",
+            "22222233445566778899aabbccddeeff".to_string(),
+            Some(0.40),
+            Some("upstream".to_string()),
+            Some("downstream".to_string()),
+            Some("exact".to_string()),
+        ),
+        FindingEvidence::chain_ref(
+            "prompt_ref",
+            "00112233445566778899aabbccddeeff".to_string(),
+            None,
+            None,
+            None,
+            Some("downstream_prompt".to_string()),
+        ),
+        FindingEvidence {
+            kind: "syscall".to_string(),
+            event_id: "evt-risk".to_string(),
+            ingest_seq: 1,
+            path: None,
+            ip: None,
+            port: None,
+            score: None,
+            src: None,
+            dst: None,
+            op: Some("proc_exec".to_string()),
+            note: Some("risky_action_after_prompt".to_string()),
+        },
+    ];
+    finding
+        .component_scores
+        .insert("causal_score".to_string(), 0.90);
     finding.health.prompt_evidence_state = PromptEvidenceState::Available;
     finding.explanation = Some("upstream excerpt -> downstream prompt -> risky action".to_string());
 
-    let value = AlertRecord::from_finding(&finding)
+    let value = AlertRecord::try_from_finding(&finding)
+        .expect("valid finding")
         .as_value()
         .expect("value");
 
@@ -237,6 +264,114 @@ fn capi_projection_is_schema_valid_and_strong() {
     assert_eq!(value["confidence_band"], "strong");
     assert_eq!(value["capture"]["redaction"], "masked");
     validate(&value).expect("schema valid");
+}
+
+#[test]
+fn capi_without_prompt_evidence_is_rejected_before_projection() {
+    let mut throttler = AlertThrottler::default();
+    let mut finding = finding(FindingType::CrossAgentPromptInjection);
+    finding.reason_code = "capi_cross_session_prompt_to_syscall".to_string();
+    finding.objects = FindingObjects {
+        prompt_ids: vec!["00112233445566778899aabbccddeeff".to_string()],
+        artifact_ids: vec!["11112233445566778899aabbccddeeff".to_string()],
+        event_ids: vec!["evt-risk".to_string()],
+        chain_id: Some("22222233445566778899aabbccddeeff".to_string()),
+        ..FindingObjects::default()
+    };
+    finding.evidence = vec![
+        FindingEvidence::chain_ref(
+            "excerpt_match",
+            "22222233445566778899aabbccddeeff".to_string(),
+            Some(0.40),
+            None,
+            None,
+            None,
+        ),
+        FindingEvidence::chain_ref(
+            "prompt_ref",
+            "00112233445566778899aabbccddeeff".to_string(),
+            None,
+            None,
+            None,
+            None,
+        ),
+        FindingEvidence {
+            kind: "syscall".to_string(),
+            event_id: "evt-risk".to_string(),
+            ingest_seq: 1,
+            path: None,
+            ip: None,
+            port: None,
+            score: None,
+            src: None,
+            dst: None,
+            op: Some("proc_exec".to_string()),
+            note: None,
+        },
+    ];
+
+    assert!(throttler.project(&finding).is_none());
+    assert!(AlertRecord::try_from_finding(&finding).is_none());
+}
+
+#[test]
+fn substring_capi_never_projects_as_critical() {
+    let mut finding = finding(FindingType::CrossAgentPromptInjection);
+    finding.reason_code = "capi_cross_session_weak_match".to_string();
+    finding.summary = "cross-session prompt injection".to_string();
+    finding.objects = FindingObjects {
+        prompt_ids: vec!["00112233445566778899aabbccddeeff".to_string()],
+        artifact_ids: vec!["11112233445566778899aabbccddeeff".to_string()],
+        event_ids: vec!["evt-risk".to_string()],
+        chain_id: Some("22222233445566778899aabbccddeeff".to_string()),
+        root_session_id: Some("33333333445566778899aabbccddeeff".to_string()),
+        downstream_session_id: Some("00112233445566778899aabbccddeeff".to_string()),
+        ..FindingObjects::default()
+    };
+    finding.evidence = vec![
+        FindingEvidence::chain_ref(
+            "excerpt_match",
+            "22222233445566778899aabbccddeeff".to_string(),
+            Some(0.15),
+            None,
+            None,
+            Some("substring".to_string()),
+        ),
+        FindingEvidence::chain_ref(
+            "prompt_ref",
+            "00112233445566778899aabbccddeeff".to_string(),
+            None,
+            None,
+            None,
+            None,
+        ),
+        FindingEvidence {
+            kind: "syscall".to_string(),
+            event_id: "evt-risk".to_string(),
+            ingest_seq: 1,
+            path: None,
+            ip: None,
+            port: None,
+            score: None,
+            src: None,
+            dst: None,
+            op: Some("proc_exec".to_string()),
+            note: None,
+        },
+    ];
+    finding.health.prompt_evidence_state = PromptEvidenceState::Available;
+    finding
+        .component_scores
+        .insert("causal_score".to_string(), 0.95);
+
+    let value = AlertRecord::try_from_finding(&finding)
+        .expect("valid finding")
+        .as_value()
+        .expect("value");
+
+    assert_eq!(value["severity"], "high");
+    assert_eq!(value["confidence_band"], "medium");
+    assert!(value["confidence_score"].as_f64().expect("score") < 0.8);
 }
 
 #[test]
@@ -258,4 +393,40 @@ fn throttler_suppresses_and_merges_inside_window() {
 
     assert!(emitted.objects.event_ids.contains(&"evt-2".to_string()));
     assert!(emitted.objects.event_ids.contains(&"evt-3".to_string()));
+}
+
+#[test]
+fn throttler_does_not_merge_across_fallback_modes() {
+    let mut throttler = AlertThrottler::default();
+    let mut first = finding(FindingType::SensitiveFileAccess);
+    first.ts_ns = 1_000;
+    let mut second = first.clone();
+    second.ts_ns = first.ts_ns + defaults::secs_to_ns(10);
+
+    assert!(throttler.project(&first).is_some());
+    let emitted = throttler
+        .project_with_health(
+            &second,
+            &RuntimeHealth::degraded("test_pressure", defaults::DROP_RATE_DEGRADE_THRESHOLD),
+        )
+        .expect("degraded explanation gets a distinct throttle key");
+
+    assert_eq!(emitted.fallback.mode, "degraded");
+}
+
+#[test]
+fn throttler_evicts_oldest_entry_when_capacity_is_exceeded() {
+    let mut throttler = AlertThrottler::with_max_entries(1);
+    let mut first = finding(FindingType::SensitiveFileAccess);
+    first.ts_ns = 1_000;
+    first.objects.paths = vec!["/etc/shadow".to_string()];
+    let mut second = first.clone();
+    second.ts_ns = 1_001;
+    second.objects.paths = vec!["/etc/passwd".to_string()];
+    let mut repeated_first = first.clone();
+    repeated_first.ts_ns = 1_002;
+
+    assert!(throttler.project(&first).is_some());
+    assert!(throttler.project(&second).is_some());
+    assert!(throttler.project(&repeated_first).is_some());
 }

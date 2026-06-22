@@ -146,7 +146,7 @@ fn connect_publishes_endpoint_snapshot() {
             tls_candidate: true,
         },
     ));
-    let endpoint = state.endpoint_snapshots().first().expect("endpoint");
+    let endpoint = state.endpoint_snapshots().front().expect("endpoint");
     assert_eq!(endpoint.fd_version, 1);
     assert_eq!(endpoint.dst.ip, "127.0.0.1");
     assert!(endpoint.tls_candidate);
@@ -321,4 +321,110 @@ fn tls_fragment_attribution_rejects_stale_fd_reuse() {
         Some("stale_tls_association")
     );
     assert!(attribution.endpoint.is_none());
+}
+
+#[test]
+fn endpoint_snapshots_are_bounded_to_recent_entries() {
+    let mut state = StateNet::with_test_limits(16, 2, 16);
+    for seq in 1..=4 {
+        state.apply(&event(
+            seq,
+            NormalizedData::NetConnect {
+                sockfd: seq as i32,
+                dport_be: 443_u16.to_be(),
+                dst_ip: Some(format!("127.0.0.{seq}")),
+                dst_port: Some(443),
+                tls_candidate: true,
+            },
+        ));
+    }
+
+    let endpoints: Vec<_> = state
+        .endpoint_snapshots()
+        .iter()
+        .map(|endpoint| endpoint.event_id.as_str())
+        .collect();
+    assert_eq!(endpoints, vec!["evt-3", "evt-4"]);
+}
+
+#[test]
+fn fd_eviction_removes_dependent_tls_associations() {
+    let mut state = StateNet::with_test_limits(1, 8, 8);
+    state.apply(&event(
+        1,
+        NormalizedData::NetConnect {
+            sockfd: 4,
+            dport_be: 443_u16.to_be(),
+            dst_ip: Some("127.0.0.1".to_string()),
+            dst_port: Some(443),
+            tls_candidate: true,
+        },
+    ));
+    state.apply(&event(
+        2,
+        NormalizedData::TlsAssoc {
+            ssl_ctx: 0xabc,
+            fd: 4,
+            assoc_ret: 1,
+            direction: ContentDirection::Write,
+        },
+    ));
+    state.apply(&event(
+        3,
+        NormalizedData::FileOpen {
+            ret_fd: 5,
+            flags: 0,
+            path: path("/tmp/newer"),
+        },
+    ));
+
+    assert!(state.fd_snapshot(10, 4).is_none());
+    assert!(
+        state
+            .tls_association(10, 0xabc, ContentDirection::Write)
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .record_tls_fragment(10, 0xabc, ContentDirection::Write, 4)
+            .degradation_reason,
+        Some("missing_tls_association")
+    );
+}
+
+#[test]
+fn tls_associations_are_bounded_to_recent_entries() {
+    let mut state = StateNet::with_test_limits(8, 8, 1);
+    for seq in 1..=2 {
+        state.apply(&event(
+            seq,
+            NormalizedData::NetConnect {
+                sockfd: seq as i32,
+                dport_be: 443_u16.to_be(),
+                dst_ip: Some(format!("127.0.0.{seq}")),
+                dst_port: Some(443),
+                tls_candidate: true,
+            },
+        ));
+        state.apply(&event(
+            seq + 10,
+            NormalizedData::TlsAssoc {
+                ssl_ctx: seq,
+                fd: seq as i32,
+                assoc_ret: 1,
+                direction: ContentDirection::Write,
+            },
+        ));
+    }
+
+    assert!(
+        state
+            .tls_association(10, 1, ContentDirection::Write)
+            .is_none()
+    );
+    assert!(
+        state
+            .tls_association(10, 2, ContentDirection::Write)
+            .is_some()
+    );
 }

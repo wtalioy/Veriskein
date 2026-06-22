@@ -11,6 +11,7 @@ use crate::signals::DetectorSignal;
 #[derive(Debug, Default)]
 pub(crate) struct DeadloopDetector {
     sessions: BTreeMap<String, DeadloopSession>,
+    session_order: VecDeque<(String, u64)>,
     cooldown_until_ns: BTreeMap<String, u64>,
 }
 
@@ -24,7 +25,7 @@ impl DeadloopDetector {
     ) -> Option<Finding> {
         let session_id = binding.session_id.hex();
         let window_ns = defaults::secs_to_ns(defaults::DEADLOOP_WINDOW_S);
-        let session = self.sessions.entry(session_id.clone()).or_default();
+        self.prune_expired(event.ts_ns, window_ns);
         let progress = signals.iter().any(|signal| match signal {
             DetectorSignal::SessionProgressSignal(progress) => !progress.path.is_empty(),
             _ => false,
@@ -66,14 +67,13 @@ impl DeadloopDetector {
             },
         };
 
-        session.push(loop_event);
-        while session
-            .events
-            .front()
-            .is_some_and(|entry| entry.ts_ns.saturating_add(window_ns) < event.ts_ns)
         {
-            session.pop_front();
+            let session = self.sessions.entry(session_id.clone()).or_default();
+            session.push(loop_event);
+            session.prune_before(event.ts_ns, window_ns);
         }
+        self.touch_session(&session_id, event.ts_ns);
+        self.prune_capacity();
 
         if self
             .cooldown_until_ns
@@ -83,20 +83,72 @@ impl DeadloopDetector {
             return None;
         }
 
+        let session = self.sessions.get(&session_id)?;
         let core_match = session.match_rules(prompt_evidence)?;
-
-        self.cooldown_until_ns.insert(
-            session_id.clone(),
-            event.ts_ns + defaults::secs_to_ns(defaults::DEADLOOP_ALERT_COOLDOWN_S),
-        );
-        Some(deadloop_finding(
+        let finding = deadloop_finding(
             event,
             binding,
             &session_id,
             &session.events,
             &core_match,
             prompt_evidence,
-        ))
+        );
+        self.cooldown_until_ns.insert(
+            session_id,
+            event.ts_ns + defaults::secs_to_ns(defaults::DEADLOOP_ALERT_COOLDOWN_S),
+        );
+        Some(finding)
+    }
+
+    pub(crate) fn prune_expired(&mut self, now_ns: u64, window_ns: u64) {
+        while let Some((session_id, ts_ns)) = self.session_order.front().cloned() {
+            let Some(session) = self.sessions.get(&session_id) else {
+                self.session_order.pop_front();
+                continue;
+            };
+            if session.last_ts_ns != ts_ns {
+                self.session_order.pop_front();
+                continue;
+            }
+            if !session.is_expired(now_ns, window_ns) {
+                break;
+            }
+            self.session_order.pop_front();
+            self.sessions.remove(&session_id);
+            self.cooldown_until_ns.remove(&session_id);
+        }
+        self.cooldown_until_ns.retain(|_, until| *until > now_ns);
+    }
+
+    fn touch_session(&mut self, session_id: &str, ts_ns: u64) {
+        self.session_order
+            .push_back((session_id.to_string(), ts_ns));
+    }
+
+    fn prune_capacity(&mut self) {
+        while self.sessions.len() > defaults::MAX_DEADLOOP_SESSIONS.max(1) {
+            let Some((session_id, ts_ns)) = self.session_order.pop_front() else {
+                break;
+            };
+            if self
+                .sessions
+                .get(&session_id)
+                .is_some_and(|session| session.last_ts_ns == ts_ns)
+            {
+                self.sessions.remove(&session_id);
+                self.cooldown_until_ns.remove(&session_id);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cooldown_count(&self) -> usize {
+        self.cooldown_until_ns.len()
     }
 }
 
@@ -142,6 +194,7 @@ struct PromptMatch {
 #[derive(Debug, Default)]
 struct DeadloopSession {
     events: VecDeque<LoopEvent>,
+    last_ts_ns: u64,
     progress_signals: u32,
     connect_counts: BTreeMap<(String, u16), u32>,
     file_counts: BTreeMap<String, u32>,
@@ -149,6 +202,7 @@ struct DeadloopSession {
 
 impl DeadloopSession {
     fn push(&mut self, event: LoopEvent) {
+        self.last_ts_ns = event.ts_ns;
         if let (Some(ip), Some(port)) = (&event.ip, event.port) {
             *self.connect_counts.entry((ip.clone(), port)).or_default() += 1;
         }
@@ -174,6 +228,22 @@ impl DeadloopSession {
         if event.progress {
             self.progress_signals = self.progress_signals.saturating_sub(1);
         }
+    }
+
+    fn prune_before(&mut self, now_ns: u64, window_ns: u64) {
+        while self
+            .events
+            .front()
+            .is_some_and(|entry| entry.ts_ns.saturating_add(window_ns) < now_ns)
+        {
+            self.pop_front();
+        }
+    }
+
+    fn is_expired(&self, now_ns: u64, window_ns: u64) -> bool {
+        self.events
+            .back()
+            .is_none_or(|entry| entry.ts_ns.saturating_add(window_ns) < now_ns)
     }
 
     fn match_rules(&self, prompt_evidence: &[PromptEvidence]) -> Option<DeadloopCoreMatch> {
@@ -305,7 +375,7 @@ fn deadloop_finding(
 
     let mut scores = BTreeMap::new();
     scores.insert(
-        "connect_rate",
+        "connect_rate".to_string(),
         core_match
             .connect
             .as_ref()
@@ -313,7 +383,7 @@ fn deadloop_finding(
             .unwrap_or(0.0),
     );
     scores.insert(
-        "file_repeat",
+        "file_repeat".to_string(),
         core_match
             .file
             .as_ref()
@@ -321,7 +391,7 @@ fn deadloop_finding(
             .unwrap_or(0.0),
     );
     scores.insert(
-        "prompt_repeat",
+        "prompt_repeat".to_string(),
         core_match
             .prompt
             .as_ref()
@@ -329,11 +399,11 @@ fn deadloop_finding(
             .unwrap_or(0.0),
     );
     scores.insert(
-        "low_progress",
+        "low_progress".to_string(),
         if core_match.low_progress { 1.0 } else { 0.0 },
     );
     if !prompt_evidence.is_empty() {
-        scores.insert("prompt_refs", prompt_evidence.len() as f32);
+        scores.insert("prompt_refs".to_string(), prompt_evidence.len() as f32);
     }
 
     Finding {
@@ -343,7 +413,7 @@ fn deadloop_finding(
         tid: event.process.tid,
         session_id: session_id.to_string(),
         agent_id: Some(binding.agent_id.hex()),
-        reason_code: "deadloop_core_no_progress",
+        reason_code: "deadloop_core_no_progress".to_string(),
         summary: format!(
             "session stuck in a {}s loop: {} connects, {} repeated file accesses, {} repeated prompts",
             defaults::DEADLOOP_WINDOW_S,

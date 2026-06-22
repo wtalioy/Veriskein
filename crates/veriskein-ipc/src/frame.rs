@@ -23,17 +23,21 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Topic {
+    #[serde(rename = "hello")]
     Hello,
+    #[serde(rename = "welcome")]
     Welcome,
+    #[serde(rename = "error")]
     Error,
+    #[serde(rename = "alerts")]
     Alert,
+    #[serde(rename = "metrics")]
     Metrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "topic", content = "payload", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IpcFrame {
     Hello(HelloFrame),
     Welcome(WelcomeFrame),
@@ -84,6 +88,7 @@ pub struct HelloFrame {
     pub schema_version: u32,
     pub client_name: String,
     pub client_version: Option<String>,
+    #[serde(rename = "subscribe")]
     pub subscriptions: Vec<Topic>,
 }
 
@@ -103,6 +108,8 @@ impl HelloFrame {
 pub struct WelcomeFrame {
     pub ipc_version: u32,
     pub schema_version: u32,
+    pub run_id: String,
+    pub schema: BTreeMap<String, u32>,
     pub server_name: String,
     pub server_version: Option<String>,
     pub queue_policy: QueuePolicy,
@@ -111,9 +118,14 @@ pub struct WelcomeFrame {
 
 impl WelcomeFrame {
     pub fn new(server_name: impl Into<String>) -> Self {
+        let mut schema = BTreeMap::new();
+        schema.insert("alert".to_string(), SCHEMA_VERSION);
+        schema.insert("metrics".to_string(), SCHEMA_VERSION);
         Self {
             ipc_version: IPC_VERSION,
             schema_version: SCHEMA_VERSION,
+            run_id: "unknown".to_string(),
+            schema,
             server_name: server_name.into(),
             server_version: None,
             queue_policy: QueuePolicy::default(),

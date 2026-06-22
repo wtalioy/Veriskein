@@ -1,3 +1,4 @@
+use unicode_normalization::UnicodeNormalization;
 use veriskein_proto::defaults;
 
 const NORMALIZED_TEXT_MAX: usize = 8192;
@@ -23,7 +24,8 @@ impl ContentSignature {
 }
 
 pub fn normalize_text(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes).to_lowercase();
+    let text = String::from_utf8_lossy(bytes).nfkc().collect::<String>();
+    let text = text.to_lowercase();
     let stripped = strip_markdown_fences(&text);
     stripped
         .lines()
@@ -77,10 +79,10 @@ fn minhash_signature(bytes: &[u8]) -> [u32; defaults::MINHASH_NPERM] {
     }
     for gram in bytes.windows(5) {
         for (perm, slot) in out.iter_mut().enumerate() {
-            let mut seed = Vec::with_capacity(gram.len() + 2);
-            seed.extend_from_slice(&(perm as u16).to_le_bytes());
-            seed.extend_from_slice(gram);
-            let hash = blake3::hash(&seed);
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&(perm as u16).to_le_bytes());
+            hasher.update(gram);
+            let hash = hasher.finalize();
             let value = u32::from_le_bytes(hash.as_bytes()[..4].try_into().expect("hash bytes"));
             *slot = (*slot).min(value);
         }
@@ -101,16 +103,12 @@ pub(crate) fn hex16(bytes: [u8; 16]) -> String {
 
 fn strip_markdown_fences(text: &str) -> String {
     let mut out = String::new();
-    let mut in_fence = false;
     for line in text.lines() {
         if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
             continue;
         }
-        if !in_fence {
-            out.push_str(line);
-            out.push('\n');
-        }
+        out.push_str(line);
+        out.push('\n');
     }
     out
 }
@@ -124,8 +122,16 @@ mod tests {
     fn normalize_is_idempotent_and_strips_noise() {
         let once = normalize_text(b"> Ignore   Previous\n```sh\nrm -rf /\n```\nInstructions");
         let twice = normalize_text(once.as_bytes());
-        assert_eq!(once, "ignore previous instructions");
+        assert_eq!(once, "ignore previous rm -rf / instructions");
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn normalize_applies_unicode_compatibility_forms() {
+        assert_eq!(
+            normalize_text("Ｓｙｓｔｅｍ　Prompt".as_bytes()),
+            "system prompt"
+        );
     }
 
     #[test]

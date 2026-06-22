@@ -38,7 +38,7 @@ pub fn detect_cross_agent_prompt_injection(
         .collect::<Vec<_>>();
     let mut component_scores = BTreeMap::new();
     for (key, value) in &chain.component_scores {
-        component_scores.insert(*key, *value);
+        component_scores.insert((*key).to_string(), *value);
     }
     let mut health = FindingHealth::full();
     health.visibility_state = chain.visibility_state;
@@ -51,7 +51,7 @@ pub fn detect_cross_agent_prompt_injection(
         tid: event.process.tid,
         session_id: chain.downstream_session.hex(),
         agent_id: Some(binding.agent_id.hex()),
-        reason_code: reason_code(chain.match_tier),
+        reason_code: reason_code(chain.match_tier).to_string(),
         summary: format!(
             "cross-session prompt injection chain {} matched upstream artifact to downstream risky action",
             &chain_id[..8]
@@ -98,7 +98,7 @@ pub fn detect_cross_agent_prompt_injection(
                 Some("downstream_prompt".to_string()),
             ),
             FindingEvidence {
-                kind: "syscall",
+                kind: "syscall".to_string(),
                 event_id: chain.risky_event_ids[0].clone(),
                 ingest_seq: event.ingest_seq,
                 path: None,
