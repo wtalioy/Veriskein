@@ -1,4 +1,4 @@
-//! Phase 1 detector findings.
+//! Detector findings and anomaly engines.
 
 mod base;
 mod capi;

@@ -3,11 +3,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 #[cfg(test)]
 use tokio::sync::oneshot::{self, error::TryRecvError};
 use tracing::info;
-use veriskein_bpf::RuntimeEventSource;
+use veriskein_bpf::{BpfRuntimeConfig, RuntimeEventSource};
 
 use crate::Cli;
 use crate::metrics::MetricsTick;
@@ -17,10 +18,12 @@ use crate::preflight::preflight;
 
 pub async fn run(cli: Cli) -> Result<()> {
     preflight(&cli)?;
-    let source = RuntimeEventSource::start().context("start BPF event source")?;
+    let config_root = resolve_config_root()?;
+    let bpf_config = load_bpf_runtime_config(&config_root)?;
+    let source =
+        RuntimeEventSource::start_with_config(bpf_config).context("start BPF event source")?;
     let sink = open_sink(cli.alert_output.as_deref()).context("open alert sink")?;
     let sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-    let config_root = resolve_config_root()?;
 
     run_with_source_and_sink(source, sink, cli, &config_root, Shutdown::Signal(sigterm)).await
 }
@@ -36,6 +39,45 @@ pub(crate) fn resolve_config_root() -> Result<std::path::PathBuf> {
         .and_then(|path| path.parent())
         .context("repo root")
         .map(|path| path.to_path_buf())
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DefaultsConfig {
+    #[serde(default)]
+    tls: TlsConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TlsConfig {
+    #[serde(default)]
+    openssl: OpensslConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpensslConfig {
+    #[serde(default)]
+    library_paths: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    soname_allowlist: Vec<String>,
+}
+
+fn load_bpf_runtime_config(config_root: &Path) -> Result<BpfRuntimeConfig> {
+    let path = config_root.join("config/defaults.toml");
+    if !path.exists() {
+        return Ok(BpfRuntimeConfig::default());
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("read defaults config {}", path.display()))?;
+    let defaults: DefaultsConfig = toml::from_str(&text)
+        .with_context(|| format!("parse defaults config {}", path.display()))?;
+    let mut config = BpfRuntimeConfig {
+        openssl_library_paths: defaults.tls.openssl.library_paths,
+        openssl_soname_allowlist: defaults.tls.openssl.soname_allowlist,
+    };
+    if config.openssl_soname_allowlist.is_empty() {
+        config.openssl_soname_allowlist = BpfRuntimeConfig::default().openssl_soname_allowlist;
+    }
+    Ok(config)
 }
 
 trait EventSource {
@@ -120,6 +162,7 @@ where
                     }
                 }
                 metrics.maybe_log(pipeline.collector_counters());
+                pipeline.maybe_refresh_endpoint_ips();
             }
         }
     }
@@ -280,7 +323,14 @@ mod tests {
         let values = drive_alerts(
             vec![
                 seeded_exec_bytes(),
-                EventFixture::for_pid(2, TEST_ROOT_PID, 1, "claude").content_frag(
+                EventFixture::for_pid(2, TEST_ROOT_PID, 1, "claude").connect(3, 443, true),
+                EventFixture::for_pid(3, TEST_ROOT_PID, 1, "claude").tls_assoc(
+                    0xabc,
+                    3,
+                    ContentDirection::Write,
+                    1,
+                ),
+                EventFixture::for_pid(4, TEST_ROOT_PID, 1, "claude").content_frag(
                     0xabc,
                     0,
                     ContentChannel::Tls,
@@ -288,7 +338,7 @@ mod tests {
                     prompt,
                     false,
                 ),
-                EventFixture::for_pid(3, TEST_ROOT_PID, 1, "claude").open(-100, 3, "/etc/shadow"),
+                EventFixture::for_pid(5, TEST_ROOT_PID, 1, "claude").open(-100, 3, "/etc/shadow"),
             ],
             false,
         )
@@ -312,7 +362,14 @@ mod tests {
         let prompt = br#"{"prompt":"please inspect /etc/shadow"}"#;
         let values = drive_alerts(
             vec![
-                EventFixture::for_pid(1, TEST_ROOT_PID, 1, "claude").content_frag(
+                EventFixture::for_pid(1, TEST_ROOT_PID, 1, "claude").connect(3, 443, true),
+                EventFixture::for_pid(2, TEST_ROOT_PID, 1, "claude").tls_assoc(
+                    0xabc,
+                    3,
+                    ContentDirection::Write,
+                    1,
+                ),
+                EventFixture::for_pid(3, TEST_ROOT_PID, 1, "claude").content_frag(
                     0xabc,
                     0,
                     ContentChannel::Tls,
@@ -320,9 +377,9 @@ mod tests {
                     prompt,
                     false,
                 ),
-                EventFixture::for_pid(2, TEST_ROOT_PID, 1, "claude")
+                EventFixture::for_pid(4, TEST_ROOT_PID, 1, "claude")
                     .exec("/usr/bin/claude", &["claude"]),
-                EventFixture::for_pid(3, TEST_ROOT_PID, 1, "claude").open(-100, 3, "/etc/shadow"),
+                EventFixture::for_pid(5, TEST_ROOT_PID, 1, "claude").open(-100, 3, "/etc/shadow"),
             ],
             false,
         )

@@ -1,5 +1,5 @@
-# This list stays intentionally small and high-signal for Phase 1 so detector
-# behavior remains explainable in tests and local demos.
+# This list stays intentionally small and high-signal so detector behavior
+# remains explainable in tests and local demos.
 [[rule]]
 glob = "/etc/shadow"
 severity = "high"

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use veriskein_alert::{AlertThrottler, emit_ndjson_line, validate};
@@ -15,7 +16,8 @@ use veriskein_correlator::{
 use veriskein_detectors::{DetectorEngine, Finding, detect_cross_agent_prompt_injection};
 use veriskein_graph::{AgentConfig, EnvEvidence, GraphState, LlmEndpointResolver};
 use veriskein_normalizer::{
-    NormalizedData, NormalizedEvent, Normalizer, ProcessSnapshot, SensitiveConfig, load_workspaces,
+    NormalizedData, NormalizedEvent, Normalizer, ProcessSnapshot, SensitiveConfig,
+    file_access_mode, load_workspaces,
 };
 use veriskein_proto::{OwnedContentFragEvent, OwnedEvent, defaults};
 use veriskein_state_net::StateNet;
@@ -35,6 +37,7 @@ pub struct RuntimePipeline {
     pending_prompts: BTreeMap<u32, Vec<PendingPrompt>>,
     capi: CapiState,
     alert_throttler: AlertThrottler,
+    last_endpoint_refresh: Instant,
 }
 
 impl RuntimePipeline {
@@ -65,6 +68,7 @@ impl RuntimePipeline {
             pending_prompts: BTreeMap::new(),
             capi: CapiState::new(injection_keywords),
             alert_throttler: AlertThrottler::default(),
+            last_endpoint_refresh: Instant::now(),
         })
     }
 
@@ -122,6 +126,18 @@ impl RuntimePipeline {
 
     pub(crate) fn collector_counters(&self) -> &veriskein_collector::CollectorCounters {
         self.collector.counters()
+    }
+
+    pub(crate) fn maybe_refresh_endpoint_ips(&mut self) {
+        let interval = Duration::from_secs(defaults::LLM_ENDPOINT_DNS_REFRESH_S);
+        if self.last_endpoint_refresh.elapsed() < interval {
+            return;
+        }
+        self.graph
+            .refresh_endpoint_ips(LlmEndpointResolver::resolve(
+                &self.agent_config.llm_endpoints,
+            ));
+        self.last_endpoint_refresh = Instant::now();
     }
 
     fn process_content_fragment(&mut self, evt: &OwnedContentFragEvent) {
@@ -186,7 +202,8 @@ impl RuntimePipeline {
         if *ret_fd < 0 {
             return;
         }
-        let (is_read, is_write) = file_access_modes(*flags);
+        let access = file_access_mode(*flags);
+        let (is_read, is_write) = (access.is_read, access.is_write);
         if !is_write && !is_read {
             return;
         }
@@ -290,13 +307,7 @@ impl RuntimePipeline {
                     |prompt_id| prompts.snapshot(prompt_id),
                 )
             })
-            .filter_map(|chain| {
-                detect_cross_agent_prompt_injection(
-                    &chain,
-                    normalized.process.pid,
-                    normalized.process.tid,
-                )
-            })
+            .filter_map(|chain| detect_cross_agent_prompt_injection(&chain, normalized, binding))
             .collect()
     }
 }
@@ -305,22 +316,6 @@ impl RuntimePipeline {
 struct PendingPrompt {
     ts_ns: u64,
     prompt: ExtractedPrompt,
-}
-
-const O_WRONLY: u32 = 1;
-const O_RDWR: u32 = 2;
-const O_ACCMODE: u32 = 3;
-const O_CREAT: u32 = 64;
-const O_TRUNC: u32 = 512;
-const O_APPEND: u32 = 1024;
-
-fn file_access_modes(flags: u32) -> (bool, bool) {
-    let access_mode = flags & O_ACCMODE;
-    let is_read = access_mode == 0 || access_mode == O_RDWR;
-    let is_write = access_mode == O_WRONLY
-        || access_mode == O_RDWR
-        || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
-    (is_read, is_write)
 }
 
 fn handle_content_fragment(
@@ -334,8 +329,9 @@ fn handle_content_fragment(
         binding.map(|binding| binding.session_id),
         binding.map(|binding| binding.agent_id),
     );
-    let attribution = state_net.record_tls_fragment(evt.header.pid, evt.ssl_ctx, evt.header.ts_ns);
-    let mut provenance = StreamProvenance {
+    let attribution =
+        state_net.record_tls_fragment(evt.header.pid, evt.ssl_ctx, evt.direction, evt.header.ts_ns);
+    let provenance = StreamProvenance {
         channel: evt.channel,
         direction: evt.direction,
         source: Some(match attribution.endpoint.as_ref() {
@@ -343,16 +339,15 @@ fn handle_content_fragment(
                 "ssl_ctx={:x};dst={}:{}",
                 evt.ssl_ctx, endpoint.ip, endpoint.port
             ),
-            None => format!("ssl_ctx={:x}", evt.ssl_ctx),
+            None => match attribution.degradation_reason {
+                Some(reason) => format!("ssl_ctx={:x};tls_attribution={reason}", evt.ssl_ctx),
+                None => format!("ssl_ctx={:x}", evt.ssl_ctx),
+            },
         }),
     };
     let mut degradation_reasons = Vec::new();
     if evt.byte_len > evt.frag_len {
-        provenance.source = Some(format!("ssl_ctx={:x};truncated", evt.ssl_ctx));
         degradation_reasons.push("content_truncated".to_string());
-    }
-    if let Some(reason) = attribution.degradation_reason {
-        degradation_reasons.push(reason.to_string());
     }
     let fragment = ContentFragment::with_degradation(
         TlsStreamKey::new(evt.header.pid, evt.ssl_ctx, evt.direction).stream_id(),
@@ -397,13 +392,13 @@ fn prompt_evidence_for_event(
 }
 
 fn read_artifact_excerpt(path: &str) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(
-        bytes
-            .into_iter()
-            .take(veriskein_proto::defaults::TEXT_EXCERPT_MAX)
-            .collect(),
-    )
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::with_capacity(veriskein_proto::defaults::TEXT_EXCERPT_MAX);
+    std::io::Read::by_ref(&mut file)
+        .take(veriskein_proto::defaults::TEXT_EXCERPT_MAX as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
 }
 
 fn emit_finding(
@@ -418,4 +413,96 @@ fn emit_finding(
     validate(&value).context("validate alert against schema")?;
     emit_ndjson_line(sink, &value)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use veriskein_content::ContentDirection;
+    use veriskein_graph::{AgentConfig, EnvEvidence, GraphState};
+    use veriskein_normalizer::{ProcessSnapshot, WorkspaceRef};
+    use veriskein_proto::{
+        ContentChannel, EventHeader, OwnedContentFragEvent, VisibilityState, defaults,
+    };
+    use veriskein_state_net::StateNet;
+
+    use super::handle_content_fragment;
+
+    fn graph() -> GraphState {
+        let mut graph = GraphState::new(
+            AgentConfig {
+                default_workspace: "/tmp/ws".to_string(),
+                binary_seeds: vec!["claude".to_string()],
+                env_hints: Vec::new(),
+                argv_hints: Vec::new(),
+                llm_endpoints: Vec::new(),
+                shell_allowlist: Vec::new(),
+                sensitive_allowlist: Vec::new(),
+                delete_allowlist: Vec::new(),
+            },
+            vec![WorkspaceRef {
+                id: "ws-default".to_string(),
+                root: "/tmp/ws".into(),
+            }],
+        )
+        .expect("graph");
+        graph.seed_from_snapshot(
+            &ProcessSnapshot {
+                pid: 42,
+                tid: 42,
+                ppid: 1,
+                exe: "/usr/bin/claude".to_string(),
+                comm: "claude".to_string(),
+                argv: vec!["claude".to_string()],
+                cwd: "/tmp/ws".into(),
+            },
+            EnvEvidence::empty(),
+        );
+        graph
+    }
+
+    fn content_event(data: &[u8]) -> OwnedContentFragEvent {
+        OwnedContentFragEvent {
+            header: EventHeader {
+                ts_ns: 1,
+                abi_version: defaults::EVT_ABI_VERSION,
+                kind: veriskein_proto::EventKind::ContentFrag as u16,
+                total_len: 0,
+                pid: 42,
+                tid: 42,
+                ppid: 1,
+                uid: 1000,
+                gid: 1000,
+                cgroup_id: 0,
+                cpu: 0,
+                seq: 1,
+                mount_ns: 42,
+                ret: 0,
+                _reserved: 0,
+                comm: [0; defaults::TASK_COMM_LEN],
+            },
+            ssl_ctx: 0xabc,
+            stream_offset: 0,
+            byte_len: data.len() as u32,
+            frag_len: data.len() as u32,
+            channel: ContentChannel::Tls,
+            direction: ContentDirection::Write,
+            flags: 0,
+            data: data.to_vec(),
+        }
+    }
+
+    #[test]
+    fn missing_tls_association_attribution_does_not_degrade_prompt_text() {
+        let mut content = veriskein_content::ContentRuntime::new();
+        let prompts = handle_content_fragment(
+            &content_event(br#"{"prompt":"Please inspect /etc/shadow"}"#),
+            &graph(),
+            &StateNet::new(),
+            &mut content,
+        );
+
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].visibility, VisibilityState::Full);
+        assert!(prompts[0].degradation_reasons.is_empty());
+    }
 }

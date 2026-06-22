@@ -1,7 +1,7 @@
 use crate::{
     ContentChannel, ContentDirection, ContentFragEvent, DropReason, EventHeader, EventKind,
     FdDupEvent, FileOpenEvent, FileRenameEvent, FileUnlinkEvent, MetaDropEvent, NetConnectEvent,
-    ProcChdirEvent, ProcExecEvent, ProcExitEvent, ProcForkEvent, defaults,
+    ProcChdirEvent, ProcExecEvent, ProcExitEvent, ProcForkEvent, TlsAssocEvent, defaults,
 };
 
 #[derive(Debug, Clone)]
@@ -206,6 +206,24 @@ impl EventFixture {
         };
         let len = data.len().min(event.data.len());
         event.data[..len].copy_from_slice(&data[..len]);
+        as_vec(&event)
+    }
+
+    pub fn tls_assoc(
+        &self,
+        ssl_ctx: u64,
+        fd: i32,
+        direction: ContentDirection,
+        assoc_ret: i32,
+    ) -> Vec<u8> {
+        let event = TlsAssocEvent {
+            header: self.header(EventKind::TlsAssoc, assoc_ret),
+            ssl_ctx,
+            fd,
+            assoc_ret,
+            direction: direction as u8,
+            _reserved: [0; 7],
+        };
         as_vec(&event)
     }
 

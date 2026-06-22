@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::{
     ContentFragEvent, EventHeader, EventKind, EventRef, FdDupEvent, FileOpenEvent, FileRenameEvent,
     FileUnlinkEvent, MetaDropEvent, NetConnectEvent, ProcChdirEvent, ProcExecEvent, ProcExitEvent,
-    ProcForkEvent, defaults,
+    ProcForkEvent, TlsAssocEvent, defaults,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -56,6 +56,7 @@ pub fn parse(buf: &[u8]) -> Result<EventRef<'_>, ParseError> {
         EventKind::ContentFrag => {
             parse_as::<ContentFragEvent>(&buf[..total_len]).map(EventRef::ContentFrag)
         }
+        EventKind::TlsAssoc => parse_as::<TlsAssocEvent>(&buf[..total_len]).map(EventRef::TlsAssoc),
         EventKind::MetaDrop => parse_as::<MetaDropEvent>(&buf[..total_len]).map(EventRef::MetaDrop),
     }
 }
@@ -262,6 +263,25 @@ mod tests {
                 assert_eq!(evt.data, b"POST /v1/chat\r\n\r\n{}");
             }
             _ => panic!("expected content frag"),
+        }
+    }
+
+    #[test]
+    fn parse_tls_assoc_roundtrip() {
+        let raw = EventFixture::for_pid(11, 1100, 1, "curl").tls_assoc(
+            0xabc,
+            4,
+            ContentDirection::Write,
+            1,
+        );
+        match parse_owned(raw, "tls assoc") {
+            OwnedEvent::TlsAssoc(evt) => {
+                assert_eq!(evt.ssl_ctx, 0xabc);
+                assert_eq!(evt.fd, 4);
+                assert_eq!(evt.direction, ContentDirection::Write);
+                assert_eq!(evt.assoc_ret, 1);
+            }
+            _ => panic!("expected tls assoc"),
         }
     }
 }

@@ -1,3 +1,5 @@
-# Optional runtime overrides land here in later phases.
-# Keeping the file checked in now gives operators a stable place for future
-# per-host tuning without changing the daemon's default search paths.
+# Optional runtime overrides.
+
+[tls.openssl]
+library_paths = []
+soname_allowlist = ["libssl.so.3", "libssl.so.1.1"]

@@ -32,6 +32,7 @@ Supported event shapes:
 {"kind":"open","pid":700101,"path":"/tmp/report.md","flags":65,"content":"prompt text written by this session","comm":"python3"}
 {"kind":"unlink","pid":700101,"path":"/tmp/demo.txt","ret":0,"comm":"python3"}
 {"kind":"connect","pid":700101,"ip":"127.0.0.1","port":443,"comm":"python3"}
+{"kind":"tls_assoc","pid":700101,"ssl_ctx":2748,"fd":3,"direction":"write","comm":"python3"}
 {"kind":"content_frag","pid":700101,"ssl_ctx":2748,"direction":"write","bytes":"{\"prompt\":\"hello\"}","comm":"python3"}
 ```
 
@@ -47,6 +48,11 @@ Defaults keep compact fixtures readable:
 - `unlink.ret`: `0`
 - `connect.ip`: `127.0.0.1`
 - `connect.port`: `443`
+- `connect.sockfd`: `3`
+- `tls_assoc.ssl_ctx`: `0xabc`
+- `tls_assoc.fd`: `3`
+- `tls_assoc.direction`: `write`
+- `tls_assoc.ret`: `1`
 - `content_frag.ssl_ctx`: `0xabc`
 - `content_frag.direction`: `write`
 - all `comm` fields: a stable fallback derived from the event

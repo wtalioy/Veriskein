@@ -2,4 +2,4 @@
 
 mod runtime;
 
-pub use runtime::RuntimeEventSource;
+pub use runtime::{BpfRuntimeConfig, RuntimeEventSource};

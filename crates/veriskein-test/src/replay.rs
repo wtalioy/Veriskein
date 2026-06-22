@@ -70,6 +70,21 @@ enum ReplayEvent {
         ip: String,
         #[serde(default = "default_port")]
         port: u16,
+        #[serde(default = "default_sockfd")]
+        sockfd: i32,
+        #[serde(default)]
+        comm: String,
+    },
+    TlsAssoc {
+        pid: u32,
+        #[serde(default = "default_ssl_ctx")]
+        ssl_ctx: u64,
+        #[serde(default = "default_sockfd")]
+        fd: i32,
+        #[serde(default = "default_direction")]
+        direction: String,
+        #[serde(default = "default_assoc_ret")]
+        ret: i32,
         #[serde(default)]
         comm: String,
     },
@@ -178,11 +193,28 @@ impl ReplayEvent {
             } => EventFixture::for_pid(seq, *pid, 1, default_comm(comm, "proc"))
                 .unlink(-100, *ret, path),
             Self::Connect {
-                pid, port, comm, ..
+                pid,
+                port,
+                sockfd,
+                comm,
+                ..
             } => EventFixture::for_pid(seq, *pid, 1, default_comm(comm, "proc")).connect(
-                3,
+                *sockfd,
                 *port,
                 *port == 443,
+            ),
+            Self::TlsAssoc {
+                pid,
+                ssl_ctx,
+                fd,
+                direction,
+                ret,
+                comm,
+            } => EventFixture::for_pid(seq, *pid, 1, default_comm(comm, "proc")).tls_assoc(
+                *ssl_ctx,
+                *fd,
+                parse_direction(direction)?,
+                *ret,
             ),
             Self::ContentFrag {
                 pid,
@@ -318,6 +350,10 @@ fn default_port() -> u16 {
     443
 }
 
+fn default_sockfd() -> i32 {
+    3
+}
+
 fn default_ip() -> String {
     "127.0.0.1".to_string()
 }
@@ -328,6 +364,10 @@ fn default_ssl_ctx() -> u64 {
 
 fn default_direction() -> String {
     "write".to_string()
+}
+
+fn default_assoc_ret() -> i32 {
+    1
 }
 
 fn parse_direction(direction: &str) -> Result<ContentDirection> {

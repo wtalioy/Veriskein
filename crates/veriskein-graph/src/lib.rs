@@ -1,4 +1,4 @@
-//! Phase 1 root election and session attribution.
+//! Root election, session attribution, and role state.
 
 mod config;
 mod evidence;

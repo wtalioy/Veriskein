@@ -5,8 +5,8 @@ use std::sync::Arc;
 use veriskein_proto::{
     EventHeader, EventKind, FdDupEffect, OwnedEvent, OwnedFdDupEvent, OwnedFileOpenEvent,
     OwnedFileRenameEvent, OwnedFileUnlinkEvent, OwnedNetConnectEvent, OwnedProcChdirEvent,
-    OwnedProcExecEvent, OwnedProcExitEvent, OwnedProcForkEvent, event_id_hex_from_header,
-    fd_dup_effect, parse_c_string,
+    OwnedProcExecEvent, OwnedProcExitEvent, OwnedProcForkEvent, OwnedTlsAssocEvent,
+    event_id_hex_from_header, fd_dup_effect, parse_c_string,
 };
 
 use super::process::{FdEntry, ProcessState};
@@ -25,6 +25,7 @@ impl Normalizer {
             OwnedEvent::FileUnlink(evt) => self.on_file_unlink(ingest_seq, evt),
             OwnedEvent::FileRename(evt) => self.on_file_rename(ingest_seq, evt),
             OwnedEvent::NetConnect(evt) => vec![self.on_net_connect(ingest_seq, evt)],
+            OwnedEvent::TlsAssoc(evt) => vec![self.on_tls_assoc(ingest_seq, evt)],
             OwnedEvent::ContentFrag(_) => Vec::new(),
             OwnedEvent::MetaDrop(_) => Vec::new(),
         }
@@ -300,6 +301,23 @@ impl Normalizer {
                 dst_ip: net_dst_ip(evt.family, evt.addr_dst),
                 dst_port: Some(u16::from_be(evt.dport_be)),
                 tls_candidate: evt.tls_candidate,
+            },
+        )
+    }
+
+    fn on_tls_assoc(&mut self, ingest_seq: u64, evt: &OwnedTlsAssocEvent) -> NormalizedEvent {
+        let pid = evt.header.pid;
+        self.normalized_event(
+            ingest_seq,
+            EventKind::TlsAssoc,
+            self.snapshot_for(pid, &evt.header),
+            event_id_hex_from_header(&evt.header),
+            evt.header.ts_ns,
+            NormalizedData::TlsAssoc {
+                ssl_ctx: evt.ssl_ctx,
+                fd: evt.fd,
+                assoc_ret: evt.assoc_ret,
+                direction: evt.direction,
             },
         )
     }

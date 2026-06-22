@@ -121,7 +121,12 @@ impl Normalizer {
 
     fn prune_path_cache(&mut self) {
         while self.path_cache.len() > super::MAX_PATH_CACHE_ENTRIES {
-            let Some(key) = self.path_cache.keys().next().cloned() else {
+            let Some(key) = self
+                .path_cache
+                .iter()
+                .min_by_key(|(_, resolution)| resolution.freshness_ns)
+                .map(|(key, _)| key.clone())
+            else {
                 break;
             };
             self.path_cache.remove(&key);

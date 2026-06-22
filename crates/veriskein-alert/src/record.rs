@@ -270,6 +270,10 @@ pub struct AlertThrottler {
 
 impl AlertThrottler {
     pub fn project(&mut self, finding: &Finding) -> Option<AlertRecord> {
+        if !valid_finding(finding) {
+            debug_assert!(false, "malformed finding rejected before alert projection");
+            return None;
+        }
         let mut alert = AlertRecord::from_finding(finding);
         let key = throttle_key(&alert);
         let window_ns = defaults::ALERT_DEDUP_SECS * 1_000_000_000;
@@ -311,6 +315,43 @@ impl AlertThrottler {
         }
         entry.first_alert = alert.clone();
         Some(alert)
+    }
+}
+
+fn valid_finding(finding: &Finding) -> bool {
+    if finding.reason_code.is_empty() || finding.summary.is_empty() || finding.evidence.is_empty() {
+        return false;
+    }
+    match finding.finding_type {
+        FindingType::UnexpectedShell
+        | FindingType::SensitiveFileAccess
+        | FindingType::OutOfWorkspaceDeletion => finding.objects.paths.len() == 1,
+        FindingType::SingleAgentDeadloop => finding
+            .evidence
+            .iter()
+            .any(|evidence| matches!(evidence.kind, "net_connect" | "file_access")),
+        FindingType::CrossAgentPromptInjection => {
+            finding
+                .objects
+                .chain_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+                && !finding.objects.prompt_ids.is_empty()
+                && !finding.objects.artifact_ids.is_empty()
+                && finding
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == "excerpt_match")
+                && finding
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == "prompt_ref")
+                && finding
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == "syscall")
+        }
+        FindingType::ExecObserved => finding.objects.paths.len() == 1,
     }
 }
 

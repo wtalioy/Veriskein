@@ -1,4 +1,4 @@
-//! Phase 1 daemon entrypoint and runtime orchestration.
+//! Daemon entrypoint and runtime orchestration.
 
 mod driver;
 mod enrich;

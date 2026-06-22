@@ -4,6 +4,7 @@
 #include "common.h"
 
 #define EVT_CONTENT_FRAG 30
+#define EVT_TLS_ASSOC 31
 #define CONTENT_INLINE_MAX 3072
 #define CONTENT_CHANNEL_TLS 1
 #define CONTENT_DIRECTION_READ 1
@@ -23,11 +24,28 @@ struct content_frag_event {
     char data[CONTENT_INLINE_MAX];
 } __attribute__((packed));
 
+struct tls_assoc_event {
+    struct event_header header;
+    __u64 ssl_ctx;
+    __s32 fd;
+    __s32 assoc_ret;
+    __u8 direction;
+    __u8 _reserved[7];
+} __attribute__((packed));
+
 struct ssl_read_args {
     void *ssl;
     void *buf;
     __u64 requested;
     void *out_len;
+};
+
+struct ssl_assoc_args {
+    void *ssl;
+    __s32 fd;
+    __u8 direction;
+    __u8 _pad0;
+    __u16 _pad1;
 };
 
 struct stream_key {
@@ -75,6 +93,13 @@ struct {
     __type(key, __u32);
     __type(value, struct ssl_read_args);
 } ssl_read_args_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8192);
+    __type(key, __u32);
+    __type(value, struct ssl_assoc_args);
+} ssl_assoc_args_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -130,6 +155,59 @@ static __always_inline int emit_content_frag(void *ssl, const void *buf, __u64 l
     evt->_reserved = 0;
     bpf_probe_read_user(&evt->data, frag_len, buf);
     bpf_ringbuf_submit(evt, 0);
+    return 0;
+}
+
+static __always_inline int emit_tls_assoc(void *ssl, __s32 fd, __s32 ret, __u8 direction)
+{
+    struct tls_assoc_event *evt;
+
+    if (!ssl || fd < 0 || ret <= 0) {
+        return 0;
+    }
+
+    evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
+    if (!evt) {
+        return 0;
+    }
+    fill_header(&seqs, &evt->header, EVT_TLS_ASSOC, sizeof(*evt), ret);
+    evt->ssl_ctx = (__u64)ssl;
+    evt->fd = fd;
+    evt->assoc_ret = ret;
+    evt->direction = direction;
+    __builtin_memset(&evt->_reserved, 0, sizeof(evt->_reserved));
+    bpf_ringbuf_submit(evt, 0);
+    return 0;
+}
+
+static __always_inline int record_ssl_assoc_args(void *ctx, __u8 direction)
+{
+    __u32 tid = (__u32)bpf_get_current_pid_tgid();
+    struct ssl_assoc_args args = {
+        .ssl = (void *)VSK_PARM1(ctx),
+        .fd = (__s32)VSK_PARM2(ctx),
+        .direction = direction,
+    };
+    bpf_map_update_elem(&ssl_assoc_args_map, &tid, &args, BPF_ANY);
+    return 0;
+}
+
+static __always_inline int emit_ssl_assoc_exit(struct pt_regs *ctx)
+{
+    __u32 tid = (__u32)bpf_get_current_pid_tgid();
+    struct ssl_assoc_args *args = bpf_map_lookup_elem(&ssl_assoc_args_map, &tid);
+    long ret = VSK_RC(ctx);
+
+    if (!args) {
+        return 0;
+    }
+    if (args->direction == 0) {
+        emit_tls_assoc(args->ssl, args->fd, (__s32)ret, CONTENT_DIRECTION_READ);
+        emit_tls_assoc(args->ssl, args->fd, (__s32)ret, CONTENT_DIRECTION_WRITE);
+    } else {
+        emit_tls_assoc(args->ssl, args->fd, (__s32)ret, args->direction);
+    }
+    bpf_map_delete_elem(&ssl_assoc_args_map, &tid);
     return 0;
 }
 
@@ -263,6 +341,42 @@ int handle_ssl_write_ex_exit(struct pt_regs *ctx)
     }
     bpf_map_delete_elem(&ssl_read_args_map, &tid);
     return 0;
+}
+
+SEC("uprobe")
+int handle_ssl_set_fd_enter(struct pt_regs *ctx)
+{
+    return record_ssl_assoc_args(ctx, 0);
+}
+
+SEC("uretprobe")
+int handle_ssl_set_fd_exit(struct pt_regs *ctx)
+{
+    return emit_ssl_assoc_exit(ctx);
+}
+
+SEC("uprobe")
+int handle_ssl_set_rfd_enter(struct pt_regs *ctx)
+{
+    return record_ssl_assoc_args(ctx, CONTENT_DIRECTION_READ);
+}
+
+SEC("uretprobe")
+int handle_ssl_set_rfd_exit(struct pt_regs *ctx)
+{
+    return emit_ssl_assoc_exit(ctx);
+}
+
+SEC("uprobe")
+int handle_ssl_set_wfd_enter(struct pt_regs *ctx)
+{
+    return record_ssl_assoc_args(ctx, CONTENT_DIRECTION_WRITE);
+}
+
+SEC("uretprobe")
+int handle_ssl_set_wfd_exit(struct pt_regs *ctx)
+{
+    return emit_ssl_assoc_exit(ctx);
 }
 
 char LICENSE[] SEC("license") = "GPL";

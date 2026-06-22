@@ -1,11 +1,7 @@
 use veriskein_graph::Attribution;
-use veriskein_normalizer::{NormalizedData, NormalizedEvent, PathContext, PathResolutionMode};
-
-const O_WRONLY: u32 = 1;
-const O_RDWR: u32 = 2;
-const O_CREAT: u32 = 64;
-const O_TRUNC: u32 = 512;
-const O_APPEND: u32 = 1024;
+use veriskein_normalizer::{
+    NormalizedData, NormalizedEvent, PathContext, PathResolutionMode, file_access_mode,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) enum DetectorSignal {
@@ -121,7 +117,7 @@ fn is_progress_file_open(binding: &Attribution, path: &PathContext, flags: u32) 
     path.workspace
         .as_ref()
         .is_some_and(|workspace| workspace.id == binding.workspace.id)
-        && flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND) != 0
+        && file_access_mode(flags).is_write
 }
 
 fn note_for_path(path: &PathContext) -> Option<String> {

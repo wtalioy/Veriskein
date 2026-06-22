@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use veriskein_normalizer::{NormalizedData, NormalizedEvent};
-use veriskein_proto::{FdDupEffect, VisibilityState, fd_dup_effect};
+use veriskein_proto::{ContentDirection, FdDupEffect, VisibilityState, fd_dup_effect};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct FdIdentitySnapshot {
@@ -34,6 +34,17 @@ pub(crate) struct EndpointSnapshot {
     pub(crate) fd_version: u32,
     pub(crate) dst: EndpointAddr,
     pub(crate) tls_candidate: bool,
+    pub(crate) event_id: String,
+    pub(crate) ts_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TlsAssociationSnapshot {
+    pub(crate) pid: u32,
+    pub(crate) ssl_ctx: u64,
+    pub(crate) fd: i32,
+    pub(crate) direction: ContentDirection,
+    pub(crate) fd_version: u32,
     pub(crate) event_id: String,
     pub(crate) ts_ns: u64,
 }
@@ -105,6 +116,7 @@ pub struct StateNet {
     versions: BTreeMap<(u32, i32), u32>,
     fds: BTreeMap<(u32, i32), FdIdentitySnapshot>,
     endpoints: Vec<EndpointSnapshot>,
+    tls_associations: BTreeMap<(u32, u64, u8), TlsAssociationSnapshot>,
 }
 
 impl StateNet {
@@ -142,6 +154,14 @@ impl StateNet {
                 tls_candidate,
                 ..
             } => self.apply_connect(event, *sockfd, ip, *port, *tls_candidate),
+            NormalizedData::TlsAssoc {
+                ssl_ctx,
+                fd,
+                assoc_ret,
+                direction,
+            } if *assoc_ret > 0 && *fd >= 0 => {
+                self.apply_tls_assoc(event, *ssl_ctx, *fd, *direction)
+            }
             _ => {}
         }
     }
@@ -156,33 +176,51 @@ impl StateNet {
         &self.endpoints
     }
 
+    #[cfg(test)]
+    pub(crate) fn tls_association(
+        &self,
+        pid: u32,
+        ssl_ctx: u64,
+        direction: ContentDirection,
+    ) -> Option<&TlsAssociationSnapshot> {
+        self.tls_associations.get(&(pid, ssl_ctx, direction as u8))
+    }
+
     pub fn record_tls_fragment(
         &self,
         pid: u32,
-        _ssl_ctx: u64,
-        ts_ns: u64,
+        ssl_ctx: u64,
+        direction: ContentDirection,
+        _ts_ns: u64,
     ) -> TlsAttributionSnapshot {
-        let mut candidates = self
-            .endpoints
-            .iter()
-            .filter(|endpoint| {
-                endpoint.pid == pid && endpoint.tls_candidate && endpoint.ts_ns <= ts_ns
-            })
-            .rev();
-        let first = candidates.next();
-        let second = candidates.next();
-        match (first, second) {
-            (Some(endpoint), None) => TlsAttributionSnapshot {
-                endpoint: Some(endpoint.dst.clone()),
+        let Some(assoc) = self.tls_associations.get(&(pid, ssl_ctx, direction as u8)) else {
+            return TlsAttributionSnapshot {
+                endpoint: None,
+                visibility_state: VisibilityState::Partial,
+                degradation_reason: Some("missing_tls_association"),
+            };
+        };
+        let Some(fd) = self.fds.get(&(pid, assoc.fd)) else {
+            return TlsAttributionSnapshot {
+                endpoint: None,
+                visibility_state: VisibilityState::Partial,
+                degradation_reason: Some("missing_tls_endpoint"),
+            };
+        };
+        if fd.fd_version != assoc.fd_version {
+            return TlsAttributionSnapshot {
+                endpoint: None,
+                visibility_state: VisibilityState::Partial,
+                degradation_reason: Some("stale_tls_association"),
+            };
+        }
+        match &fd.endpoint {
+            Some(endpoint) => TlsAttributionSnapshot {
+                endpoint: Some(endpoint.clone()),
                 visibility_state: VisibilityState::Full,
                 degradation_reason: None,
             },
-            (Some(endpoint), Some(_)) => TlsAttributionSnapshot {
-                endpoint: Some(endpoint.dst.clone()),
-                visibility_state: VisibilityState::Partial,
-                degradation_reason: Some("inferred_tls_endpoint"),
-            },
-            (None, _) => TlsAttributionSnapshot {
+            None => TlsAttributionSnapshot {
                 endpoint: None,
                 visibility_state: VisibilityState::Partial,
                 degradation_reason: Some("missing_tls_endpoint"),
@@ -233,6 +271,28 @@ impl StateNet {
             endpoint,
             tls_candidate,
         ));
+    }
+
+    fn apply_tls_assoc(
+        &mut self,
+        event: &NormalizedEvent,
+        ssl_ctx: u64,
+        fd: i32,
+        direction: ContentDirection,
+    ) {
+        let pid = event.process.pid;
+        let fd_version = self.current_or_first_version(pid, fd);
+        let snapshot = TlsAssociationSnapshot {
+            pid,
+            ssl_ctx,
+            fd,
+            direction,
+            fd_version,
+            event_id: event.event_id.clone(),
+            ts_ns: event.ts_ns,
+        };
+        self.tls_associations
+            .insert((pid, ssl_ctx, direction as u8), snapshot);
     }
 
     fn close_fd(&mut self, pid: u32, fd: i32) {

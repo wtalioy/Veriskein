@@ -97,6 +97,15 @@ pub struct OwnedContentFragEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OwnedTlsAssocEvent {
+    pub header: EventHeader,
+    pub ssl_ctx: u64,
+    pub fd: i32,
+    pub assoc_ret: i32,
+    pub direction: ContentDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OwnedMetaDropEvent {
     pub header: EventHeader,
     pub expected_seq: u64,
@@ -118,6 +127,7 @@ pub enum OwnedEvent {
     FileRename(OwnedFileRenameEvent),
     NetConnect(OwnedNetConnectEvent),
     ContentFrag(OwnedContentFragEvent),
+    TlsAssoc(OwnedTlsAssocEvent),
     MetaDrop(OwnedMetaDropEvent),
 }
 
@@ -134,6 +144,7 @@ impl OwnedEvent {
             Self::FileRename(evt) => &evt.header,
             Self::NetConnect(evt) => &evt.header,
             Self::ContentFrag(evt) => &evt.header,
+            Self::TlsAssoc(evt) => &evt.header,
             Self::MetaDrop(evt) => &evt.header,
         }
     }
@@ -150,6 +161,7 @@ impl OwnedEvent {
             Self::FileRename(_) => EventKind::FileRename,
             Self::NetConnect(_) => EventKind::NetConnect,
             Self::ContentFrag(_) => EventKind::ContentFrag,
+            Self::TlsAssoc(_) => EventKind::TlsAssoc,
             Self::MetaDrop(_) => EventKind::MetaDrop,
         }
     }
@@ -221,6 +233,7 @@ pub enum EventRef<'a> {
     FileRename(&'a crate::FileRenameEvent),
     NetConnect(&'a crate::NetConnectEvent),
     ContentFrag(&'a crate::ContentFragEvent),
+    TlsAssoc(&'a crate::TlsAssocEvent),
     MetaDrop(&'a crate::MetaDropEvent),
 }
 
@@ -237,6 +250,7 @@ impl<'a> EventRef<'a> {
             Self::FileRename(evt) => &evt.header,
             Self::NetConnect(evt) => &evt.header,
             Self::ContentFrag(evt) => &evt.header,
+            Self::TlsAssoc(evt) => &evt.header,
             Self::MetaDrop(evt) => &evt.header,
         }
     }
@@ -328,6 +342,14 @@ impl<'a> EventRef<'a> {
                     data: evt.data[..frag_len].to_vec(),
                 })
             }
+            Self::TlsAssoc(evt) => OwnedEvent::TlsAssoc(OwnedTlsAssocEvent {
+                header: evt.header,
+                ssl_ctx: evt.ssl_ctx,
+                fd: evt.fd,
+                assoc_ret: evt.assoc_ret,
+                direction: ContentDirection::from_raw(evt.direction)
+                    .unwrap_or(ContentDirection::Write),
+            }),
             Self::MetaDrop(evt) => OwnedEvent::MetaDrop(OwnedMetaDropEvent {
                 header: evt.header,
                 expected_seq: evt.expected_seq,

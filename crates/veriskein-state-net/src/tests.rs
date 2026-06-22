@@ -4,8 +4,7 @@ use veriskein_normalizer::{
     NormalizedData, NormalizedEvent, PathContext, PathResolution, PathResolutionMode, PathVerdict,
     ProcessSnapshot,
 };
-use veriskein_proto::EventKind;
-use veriskein_proto::VisibilityState;
+use veriskein_proto::{ContentDirection, EventKind, VisibilityState};
 
 use crate::{StateNet, state::FdIdentityKind};
 
@@ -30,6 +29,7 @@ fn event(seq: u64, data: NormalizedData) -> NormalizedEvent {
             NormalizedData::FileOpen { .. } => EventKind::FileOpen,
             NormalizedData::FdDup { .. } => EventKind::FdDup,
             NormalizedData::NetConnect { .. } => EventKind::NetConnect,
+            NormalizedData::TlsAssoc { .. } => EventKind::TlsAssoc,
             _ => EventKind::ProcExec,
         },
         process: process(),
@@ -157,7 +157,7 @@ fn connect_publishes_endpoint_snapshot() {
 }
 
 #[test]
-fn tls_fragment_attribution_uses_single_tls_endpoint() {
+fn tls_fragment_attribution_uses_ssl_fd_association() {
     let mut state = StateNet::new();
     state.apply(&event(
         1,
@@ -169,8 +169,22 @@ fn tls_fragment_attribution_uses_single_tls_endpoint() {
             tls_candidate: true,
         },
     ));
+    state.apply(&event(
+        2,
+        NormalizedData::TlsAssoc {
+            ssl_ctx: 0xabc,
+            fd: 4,
+            assoc_ret: 1,
+            direction: ContentDirection::Write,
+        },
+    ));
 
-    let attribution = state.record_tls_fragment(10, 0xabc, 2);
+    let assoc = state
+        .tls_association(10, 0xabc, ContentDirection::Write)
+        .expect("association");
+    assert_eq!(assoc.fd, 4);
+
+    let attribution = state.record_tls_fragment(10, 0xabc, ContentDirection::Write, 3);
 
     assert_eq!(attribution.visibility_state, VisibilityState::Full);
     assert_eq!(attribution.endpoint.expect("endpoint").ip, "127.0.0.1");
@@ -178,12 +192,45 @@ fn tls_fragment_attribution_uses_single_tls_endpoint() {
 }
 
 #[test]
-fn tls_fragment_attribution_degrades_when_endpoint_is_missing_or_ambiguous() {
+fn tls_fragment_attribution_requires_matching_direction() {
+    let mut state = StateNet::new();
+    state.apply(&event(
+        1,
+        NormalizedData::NetConnect {
+            sockfd: 4,
+            dport_be: 443_u16.to_be(),
+            dst_ip: Some("127.0.0.1".to_string()),
+            dst_port: Some(443),
+            tls_candidate: true,
+        },
+    ));
+    state.apply(&event(
+        2,
+        NormalizedData::TlsAssoc {
+            ssl_ctx: 0xabc,
+            fd: 4,
+            assoc_ret: 1,
+            direction: ContentDirection::Read,
+        },
+    ));
+
+    let attribution = state.record_tls_fragment(10, 0xabc, ContentDirection::Write, 3);
+
+    assert_eq!(attribution.visibility_state, VisibilityState::Partial);
+    assert_eq!(
+        attribution.degradation_reason,
+        Some("missing_tls_association")
+    );
+    assert!(attribution.endpoint.is_none());
+}
+
+#[test]
+fn tls_fragment_attribution_degrades_without_ssl_fd_association() {
     let mut state = StateNet::new();
 
-    let missing = state.record_tls_fragment(10, 0xabc, 1);
+    let missing = state.record_tls_fragment(10, 0xabc, ContentDirection::Write, 1);
     assert_eq!(missing.visibility_state, VisibilityState::Partial);
-    assert_eq!(missing.degradation_reason, Some("missing_tls_endpoint"));
+    assert_eq!(missing.degradation_reason, Some("missing_tls_association"));
 
     for seq in 1..=2 {
         state.apply(&event(
@@ -198,8 +245,80 @@ fn tls_fragment_attribution_degrades_when_endpoint_is_missing_or_ambiguous() {
         ));
     }
 
-    let ambiguous = state.record_tls_fragment(10, 0xabc, 3);
-    assert_eq!(ambiguous.visibility_state, VisibilityState::Partial);
-    assert_eq!(ambiguous.degradation_reason, Some("inferred_tls_endpoint"));
-    assert_eq!(ambiguous.endpoint.expect("latest endpoint").ip, "127.0.0.2");
+    let still_missing = state.record_tls_fragment(10, 0xabc, ContentDirection::Write, 3);
+    assert_eq!(still_missing.visibility_state, VisibilityState::Partial);
+    assert_eq!(
+        still_missing.degradation_reason,
+        Some("missing_tls_association")
+    );
+    assert!(still_missing.endpoint.is_none());
+}
+
+#[test]
+fn tls_fragment_attribution_degrades_when_associated_fd_has_no_endpoint() {
+    let mut state = StateNet::new();
+    state.apply(&event(
+        1,
+        NormalizedData::FileOpen {
+            ret_fd: 4,
+            flags: 0,
+            path: path("/tmp/not-a-socket"),
+        },
+    ));
+    state.apply(&event(
+        2,
+        NormalizedData::TlsAssoc {
+            ssl_ctx: 0xabc,
+            fd: 4,
+            assoc_ret: 1,
+            direction: ContentDirection::Write,
+        },
+    ));
+
+    let attribution = state.record_tls_fragment(10, 0xabc, ContentDirection::Write, 3);
+
+    assert_eq!(attribution.visibility_state, VisibilityState::Partial);
+    assert_eq!(attribution.degradation_reason, Some("missing_tls_endpoint"));
+    assert!(attribution.endpoint.is_none());
+}
+
+#[test]
+fn tls_fragment_attribution_rejects_stale_fd_reuse() {
+    let mut state = StateNet::new();
+    state.apply(&event(
+        1,
+        NormalizedData::NetConnect {
+            sockfd: 4,
+            dport_be: 443_u16.to_be(),
+            dst_ip: Some("127.0.0.1".to_string()),
+            dst_port: Some(443),
+            tls_candidate: true,
+        },
+    ));
+    state.apply(&event(
+        2,
+        NormalizedData::TlsAssoc {
+            ssl_ctx: 0xabc,
+            fd: 4,
+            assoc_ret: 1,
+            direction: ContentDirection::Write,
+        },
+    ));
+    state.apply(&event(
+        3,
+        NormalizedData::FileOpen {
+            ret_fd: 4,
+            flags: 0,
+            path: path("/tmp/reused"),
+        },
+    ));
+
+    let attribution = state.record_tls_fragment(10, 0xabc, ContentDirection::Write, 4);
+
+    assert_eq!(attribution.visibility_state, VisibilityState::Partial);
+    assert_eq!(
+        attribution.degradation_reason,
+        Some("stale_tls_association")
+    );
+    assert!(attribution.endpoint.is_none());
 }

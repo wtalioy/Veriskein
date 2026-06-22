@@ -1,4 +1,4 @@
-//! Phase 0 ring buffer event sequencing and drop synthesis.
+//! Ring buffer event sequencing and drop synthesis.
 //! This crate owns per-CPU ordering and ingest sequence assignment.
 
 mod core;

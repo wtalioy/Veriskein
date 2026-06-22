@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
 use veriskein_correlator::{EvidenceChain, MatchTier};
+use veriskein_graph::Attribution;
+use veriskein_normalizer::NormalizedEvent;
 
 use crate::finding::{
     Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
@@ -8,8 +10,8 @@ use crate::finding::{
 
 pub fn detect_cross_agent_prompt_injection(
     chain: &EvidenceChain,
-    pid: u32,
-    tid: u32,
+    event: &NormalizedEvent,
+    binding: &Attribution,
 ) -> Option<Finding> {
     if chain.root_session == chain.downstream_session {
         return None;
@@ -45,18 +47,18 @@ pub fn detect_cross_agent_prompt_injection(
     Some(Finding {
         finding_type: FindingType::CrossAgentPromptInjection,
         ts_ns: chain.ts_ns,
-        pid,
-        tid,
+        pid: event.process.pid,
+        tid: event.process.tid,
         session_id: chain.downstream_session.hex(),
-        agent_id: None,
+        agent_id: Some(binding.agent_id.hex()),
         reason_code: reason_code(chain.match_tier),
         summary: format!(
             "cross-session prompt injection chain {} matched upstream artifact to downstream risky action",
             &chain_id[..8]
         ),
-        process_comm: String::new(),
-        process_binary: String::new(),
-        workspace: String::new(),
+        process_comm: event.process.comm.clone(),
+        process_binary: event.process.exe.clone(),
+        workspace: binding.workspace.root.display().to_string(),
         objects: FindingObjects {
             paths: Vec::new(),
             ips: Vec::new(),
@@ -65,10 +67,10 @@ pub fn detect_cross_agent_prompt_injection(
             artifact_ids,
             event_ids: chain.risky_event_ids.clone(),
             chain_id: Some(chain_id.clone()),
-            workspace_id: None,
+            workspace_id: Some(binding.workspace.id.clone()),
             root_session_id: Some(chain.root_session.hex()),
             downstream_session_id: Some(chain.downstream_session.hex()),
-            argv: Vec::new(),
+            argv: event.process.argv.clone(),
         },
         evidence: vec![
             FindingEvidence::chain_ref(
@@ -95,14 +97,19 @@ pub fn detect_cross_agent_prompt_injection(
                 None,
                 Some("downstream_prompt".to_string()),
             ),
-            FindingEvidence::chain_ref(
-                "syscall",
-                chain.risky_event_ids[0].clone(),
-                None,
-                None,
-                None,
-                Some("risky_action_after_prompt".to_string()),
-            ),
+            FindingEvidence {
+                kind: "syscall",
+                event_id: chain.risky_event_ids[0].clone(),
+                ingest_seq: event.ingest_seq,
+                path: None,
+                ip: None,
+                port: None,
+                score: None,
+                src: None,
+                dst: None,
+                op: Some(event.kind.as_str().to_string()),
+                note: Some("risky_action_after_prompt".to_string()),
+            },
         ],
         health,
         component_scores,
@@ -119,18 +126,26 @@ fn reason_code(tier: MatchTier) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use veriskein_correlator::{EvidenceChain, MatchTier, PropagationFact};
-    use veriskein_proto::{ArtifactId, ChainId, PromptId, SessionId, VisibilityState};
+    use veriskein_graph::{Attribution, RootEvidence, SessionState};
+    use veriskein_normalizer::{NormalizedData, NormalizedEvent, ProcessSnapshot};
+    use veriskein_proto::{
+        AgentId, ArtifactId, AttributionStrength, ChainId, EventKind, PromptId, Role, SessionId,
+        VisibilityState,
+    };
 
     use super::detect_cross_agent_prompt_injection;
 
     #[test]
     fn capi_finding_carries_chain_objects() {
+        let downstream = SessionId::from_seed(b"b");
         let chain = EvidenceChain {
             id: ChainId::from_seed(b"chain"),
             ts_ns: 99,
             root_session: SessionId::from_seed(b"a"),
-            downstream_session: SessionId::from_seed(b"b"),
+            downstream_session: downstream,
             prompt_ids: vec![PromptId::from_seed(b"prompt")],
             artifact_ids: vec![ArtifactId::from_seed(b"artifact")],
             risky_event_ids: vec!["evt".to_string()],
@@ -147,11 +162,50 @@ mod tests {
             redacted_artifact_excerpt: "upstream".to_string(),
             redacted_prompt_excerpt: "downstream".to_string(),
         };
+        let event = NormalizedEvent {
+            ingest_seq: 42,
+            event_id: "evt".to_string(),
+            ts_ns: 99,
+            kind: EventKind::ProcExec,
+            process: ProcessSnapshot {
+                pid: 7,
+                tid: 7,
+                ppid: 1,
+                exe: "/bin/sh".to_string(),
+                comm: "sh".to_string(),
+                argv: vec!["sh".to_string()],
+                cwd: PathBuf::from("/tmp/ws"),
+            },
+            data: NormalizedData::ProcExec {
+                filename: "/bin/sh".to_string(),
+                argv: vec!["sh".to_string()],
+            },
+        };
+        let binding = Attribution {
+            session_id: downstream,
+            agent_id: AgentId::from_seed(b"agent"),
+            lineage_id: "lineage".to_string(),
+            workspace: veriskein_normalizer::WorkspaceRef {
+                id: "ws-1".to_string(),
+                root: PathBuf::from("/tmp/ws"),
+            },
+            root_pid: 7,
+            state: SessionState::ConfirmedRoot,
+            role: Role::RootAgent,
+            role_version: 1,
+            role_tags: Vec::new(),
+            attribution_strength: AttributionStrength::Strong,
+            root_evidence: Vec::<RootEvidence>::new(),
+            revocable_until_ns: None,
+        };
 
-        let finding = detect_cross_agent_prompt_injection(&chain, 7, 7).expect("finding");
+        let finding =
+            detect_cross_agent_prompt_injection(&chain, &event, &binding).expect("finding");
 
         assert_eq!(finding.objects.chain_id, Some(chain.id.hex()));
         assert_eq!(finding.objects.prompt_ids.len(), 1);
         assert_eq!(finding.evidence[0].kind, "excerpt_match");
+        assert_eq!(finding.agent_id, Some(binding.agent_id.hex()));
+        assert_eq!(finding.evidence[3].ingest_seq, 42);
     }
 }

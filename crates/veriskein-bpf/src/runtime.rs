@@ -17,6 +17,21 @@ const FS_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.bpf.o"
 const NET_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/net.bpf.o"));
 const TLS_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tls_uprobe.bpf.o"));
 
+#[derive(Debug, Clone)]
+pub struct BpfRuntimeConfig {
+    pub openssl_library_paths: Vec<PathBuf>,
+    pub openssl_soname_allowlist: Vec<String>,
+}
+
+impl Default for BpfRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            openssl_library_paths: Vec::new(),
+            openssl_soname_allowlist: vec!["libssl.so.3".to_string(), "libssl.so.1.1".to_string()],
+        }
+    }
+}
+
 struct LoadedObject {
     name: &'static str,
     object: Object,
@@ -30,10 +45,14 @@ pub struct RuntimeEventSource {
 
 impl RuntimeEventSource {
     pub fn start() -> Result<Self> {
+        Self::start_with_config(BpfRuntimeConfig::default())
+    }
+
+    pub fn start_with_config(config: BpfRuntimeConfig) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
-        let openssl_libraries = discover_openssl_libraries();
+        let openssl_libraries = discover_openssl_libraries(&config)?;
 
         let worker = thread::Builder::new()
             .name("veriskein-bpf".to_string())
@@ -193,6 +212,12 @@ fn attach_openssl_programs(
         ("handle_ssl_write_exit", "SSL_write", true),
         ("handle_ssl_write_ex_enter", "SSL_write_ex", false),
         ("handle_ssl_write_ex_exit", "SSL_write_ex", true),
+        ("handle_ssl_set_fd_enter", "SSL_set_fd", false),
+        ("handle_ssl_set_fd_exit", "SSL_set_fd", true),
+        ("handle_ssl_set_rfd_enter", "SSL_set_rfd", false),
+        ("handle_ssl_set_rfd_exit", "SSL_set_rfd", true),
+        ("handle_ssl_set_wfd_enter", "SSL_set_wfd", false),
+        ("handle_ssl_set_wfd_exit", "SSL_set_wfd", true),
     ];
     let start_len = links.len();
     for (program_name, symbol, retprobe) in specs {
@@ -214,9 +239,28 @@ fn attach_openssl_programs(
     Ok(links.len() - start_len)
 }
 
-fn discover_openssl_libraries() -> Vec<PathBuf> {
+fn discover_openssl_libraries(config: &BpfRuntimeConfig) -> Result<Vec<PathBuf>> {
     let mut paths = BTreeSet::new();
-    for path in ldconfig_openssl_paths() {
+    for configured in &config.openssl_library_paths {
+        if !configured.is_file() {
+            return Err(anyhow!(
+                "configured OpenSSL library path is not a file: {}",
+                configured.display()
+            ));
+        }
+        if !is_supported_openssl_path(config, configured) {
+            return Err(anyhow!(
+                "configured OpenSSL library path is not allowed by soname policy: {}",
+                configured.display()
+            ));
+        }
+        paths.insert(
+            configured
+                .canonicalize()
+                .unwrap_or_else(|_| configured.clone()),
+        );
+    }
+    for path in ldconfig_openssl_paths(config) {
         paths.insert(path);
     }
     for candidate in [
@@ -233,16 +277,16 @@ fn discover_openssl_libraries() -> Vec<PathBuf> {
     ] {
         paths.insert(PathBuf::from(candidate));
     }
-    paths
+    Ok(paths
         .into_iter()
-        .filter(|path| path.is_file() && is_supported_openssl_path(path))
+        .filter(|path| path.is_file() && is_supported_openssl_path(config, path))
         .map(|path| path.canonicalize().unwrap_or(path))
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .collect()
+        .collect())
 }
 
-fn ldconfig_openssl_paths() -> Vec<PathBuf> {
+fn ldconfig_openssl_paths(config: &BpfRuntimeConfig) -> Vec<PathBuf> {
     let Ok(output) = Command::new("ldconfig").arg("-p").output() else {
         return Vec::new();
     };
@@ -255,12 +299,17 @@ fn ldconfig_openssl_paths() -> Vec<PathBuf> {
             line.split_once("=>")
                 .map(|(_, path)| PathBuf::from(path.trim()))
         })
-        .filter(|path| is_supported_openssl_path(path))
+        .filter(|path| is_supported_openssl_path(config, path))
         .collect()
 }
 
-fn is_supported_openssl_path(path: &Path) -> bool {
+fn is_supported_openssl_path(config: &BpfRuntimeConfig, path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("libssl.so.3") || name.starts_with("libssl.so.1.1"))
+        .is_some_and(|name| {
+            config
+                .openssl_soname_allowlist
+                .iter()
+                .any(|allowed| name.starts_with(allowed))
+        })
 }

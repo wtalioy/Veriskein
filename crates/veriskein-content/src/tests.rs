@@ -21,6 +21,17 @@ fn fragment(stream_id: u64, offset: u64, bytes: impl Into<Vec<u8>>) -> ContentFr
     ContentFragment::with_degradation(stream_id, offset, bytes, owner(), provenance(), Vec::new())
 }
 
+fn fragment_with_source(
+    stream_id: u64,
+    offset: u64,
+    bytes: impl Into<Vec<u8>>,
+    source: &str,
+) -> ContentFragment {
+    let mut provenance = provenance();
+    provenance.source = Some(source.to_string());
+    ContentFragment::with_degradation(stream_id, offset, bytes, owner(), provenance, Vec::new())
+}
+
 #[test]
 fn http_reassembly_split_fragments() {
     let mut runtime = ContentRuntime::new();
@@ -111,6 +122,30 @@ fn duplicate_overlap_is_accepted() {
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0].text, "duplicate");
     assert_eq!(prompts[0].visibility, VisibilityState::Full);
+}
+
+#[test]
+fn source_only_provenance_changes_do_not_degrade_content() {
+    let mut runtime = ContentRuntime::new();
+    let first = br#"{"prompt":"source "#;
+    let second = br#"changes"}"#;
+
+    assert!(
+        runtime
+            .append(fragment_with_source(14, 0, first, "ssl_ctx=abc"))
+            .is_empty()
+    );
+    let prompts = runtime.append(fragment_with_source(
+        14,
+        first.len() as u64,
+        second,
+        "ssl_ctx=abc;dst=127.0.0.1:443",
+    ));
+
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].text, "source changes");
+    assert_eq!(prompts[0].visibility, VisibilityState::Full);
+    assert!(prompts[0].degradation_reasons.is_empty());
 }
 
 #[test]

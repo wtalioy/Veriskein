@@ -66,7 +66,9 @@ impl StreamState {
 
     fn append(&mut self, fragment: ContentFragment) {
         self.stream_id = fragment.stream_id;
-        if self.owner != fragment.owner || self.provenance != fragment.provenance {
+        if self.owner != fragment.owner
+            || provenance_conflicts(&self.provenance, &fragment.provenance)
+        {
             push_unique_reason(&mut self.degraded_reasons, "stream_metadata_conflict");
         }
         for reason in fragment.degradation_reasons {
@@ -278,6 +280,10 @@ fn merged_reasons(stream_reasons: &[String], candidate_reasons: &[String]) -> Ve
         push_unique_reason(&mut out, reason);
     }
     out
+}
+
+fn provenance_conflicts(left: &StreamProvenance, right: &StreamProvenance) -> bool {
+    left.channel != right.channel || left.direction != right.direction
 }
 
 fn push_unique_reason(reasons: &mut Vec<String>, reason: impl AsRef<str>) {

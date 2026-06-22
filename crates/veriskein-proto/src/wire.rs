@@ -129,6 +129,14 @@ plain_struct!(ContentFragEvent {
     data: [u8; defaults::CONTENT_INLINE_MAX]
 });
 
+plain_struct!(TlsAssocEvent {
+    ssl_ctx: u64,
+    fd: i32,
+    assoc_ret: i32,
+    direction: u8,
+    _reserved: [u8; 7]
+});
+
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MetaDropEvent {

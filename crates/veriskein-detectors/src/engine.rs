@@ -89,6 +89,14 @@ fn attach_prompt_evidence(finding: &mut Finding, prompt_evidence: &[PromptEviden
             prompt.ingest_seq,
             Some(prompt.kind.note()),
         ));
+        if !finding
+            .objects
+            .prompt_ids
+            .iter()
+            .any(|existing| existing == &prompt.prompt_id)
+        {
+            finding.objects.prompt_ids.push(prompt.prompt_id.clone());
+        }
         finding.objects.event_ids.push(prompt.prompt_id.clone());
         finding.health.prompt_evidence_state = match prompt.visibility_state {
             VisibilityState::Full => PromptEvidenceState::Available,

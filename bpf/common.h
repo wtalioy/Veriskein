@@ -7,7 +7,7 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 
-#define EVT_ABI_VERSION 1
+#define EVT_ABI_VERSION 2
 #define TASK_COMM_LEN 16
 
 struct event_header {

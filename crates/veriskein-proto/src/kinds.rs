@@ -13,6 +13,7 @@ pub enum EventKind {
     FileRename = 12,
     NetConnect = 20,
     ContentFrag = 30,
+    TlsAssoc = 31,
     MetaDrop = 250,
 }
 
@@ -29,6 +30,7 @@ impl EventKind {
             12 => Some(Self::FileRename),
             20 => Some(Self::NetConnect),
             30 => Some(Self::ContentFrag),
+            31 => Some(Self::TlsAssoc),
             250 => Some(Self::MetaDrop),
             _ => None,
         }
@@ -46,6 +48,7 @@ impl EventKind {
             Self::FileRename => "file_rename",
             Self::NetConnect => "net_connect",
             Self::ContentFrag => "content_frag",
+            Self::TlsAssoc => "tls_assoc",
             Self::MetaDrop => "meta_drop",
         }
     }

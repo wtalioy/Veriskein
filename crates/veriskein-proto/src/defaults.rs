@@ -1,4 +1,4 @@
-pub const EVT_ABI_VERSION: u32 = 1;
+pub const EVT_ABI_VERSION: u32 = 2;
 // These inline capacities must stay in lockstep with the BPF-side structs.
 pub const TASK_COMM_LEN: usize = 16;
 pub const PATH_INLINE_MAX: usize = 256;
