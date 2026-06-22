@@ -630,3 +630,18 @@ fn no_workspace_means_no_binding() {
     .expect("graph");
     assert!(graph.apply(&exec_event(200, "/usr/bin/claude")).is_none());
 }
+
+#[test]
+fn mcp_process_argv_assigns_mcp_server_role() {
+    let mut graph = graph();
+    let binding = graph
+        .apply(&exec_event_with(
+            201,
+            1,
+            "/usr/bin/claude",
+            vec!["claude".to_string(), "mcp-server".to_string()],
+        ))
+        .expect("binding");
+
+    assert_eq!(binding.role, Role::McpServer);
+}

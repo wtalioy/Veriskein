@@ -144,6 +144,7 @@ pub struct Normalizer {
     processes: BTreeMap<u32, ProcessState>,
     process_order: VecDeque<u32>,
     expiring: BTreeMap<u32, ProcessState>,
+    expiring_order: VecDeque<u32>,
     path_cache: BoundedMap<PathCacheKey, PathResolution>,
     evicted_process_detail_total: u64,
 }
@@ -156,6 +157,7 @@ impl Normalizer {
             processes: BTreeMap::new(),
             process_order: VecDeque::new(),
             expiring: BTreeMap::new(),
+            expiring_order: VecDeque::new(),
             path_cache: BoundedMap::new(MAX_PATH_CACHE_ENTRIES),
             evicted_process_detail_total: 0,
         };
@@ -181,13 +183,12 @@ impl Normalizer {
     }
 
     pub(crate) fn enforce_process_bounds(&mut self) {
-        while self.processes.len() + self.expiring.len()
-            > veriskein_proto::defaults::MAX_PROCESS_STATES
-        {
-            if let Some(pid) = self.expiring.keys().next().copied() {
-                self.expiring.remove(&pid);
-                self.evicted_process_detail_total =
-                    self.evicted_process_detail_total.saturating_add(1);
+        self.enforce_process_bounds_to(veriskein_proto::defaults::MAX_PROCESS_STATES);
+    }
+
+    pub(crate) fn enforce_process_bounds_to(&mut self, max_entries: usize) {
+        while self.processes.len() + self.expiring.len() > max_entries {
+            if self.evict_oldest_expiring_process() {
                 continue;
             }
             let Some(pid) = self.process_order.pop_front() else {
@@ -198,6 +199,22 @@ impl Normalizer {
                     self.evicted_process_detail_total.saturating_add(1);
             }
         }
+    }
+
+    pub(crate) fn note_expiring_process(&mut self, pid: u32) {
+        self.expiring_order.retain(|existing| *existing != pid);
+        self.expiring_order.push_back(pid);
+    }
+
+    fn evict_oldest_expiring_process(&mut self) -> bool {
+        while let Some(pid) = self.expiring_order.pop_front() {
+            if self.expiring.remove(&pid).is_some() {
+                self.evicted_process_detail_total =
+                    self.evicted_process_detail_total.saturating_add(1);
+                return true;
+            }
+        }
+        false
     }
 
     fn bootstrap_procfs(&mut self) {

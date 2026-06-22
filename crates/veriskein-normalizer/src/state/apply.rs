@@ -156,6 +156,7 @@ impl Normalizer {
                 ),
             ));
             self.expiring.insert(pid, exiting);
+            self.note_expiring_process(pid);
         }
         vec![self.normalized_event(
             ingest_seq,
@@ -350,5 +351,7 @@ impl Normalizer {
     fn collect_expired(&mut self, ts_ns: u64) {
         self.expiring
             .retain(|_, proc| proc.expired_at_ns.is_some_and(|until| until > ts_ns));
+        self.expiring_order
+            .retain(|pid| self.expiring.contains_key(pid));
     }
 }

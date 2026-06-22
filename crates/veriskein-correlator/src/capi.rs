@@ -269,6 +269,7 @@ impl CapiState {
             return;
         };
         let artifact_id = self.artifacts.insert_file_excerpt(ArtifactInput {
+            source_type: SourceType::FileExcerpt,
             origin_session: lineage.session_id,
             origin_agent: lineage.agent_id,
             origin_process: lineage.pid,
@@ -491,6 +492,10 @@ fn workspace_key(locator: &SourceLocator) -> String {
             .rsplit_once('/')
             .map(|(parent, _)| parent.to_string())
             .unwrap_or_default(),
+        SourceLocator::FdStream { stream_id, channel } => {
+            format!("fd-stream:{}:{stream_id}", channel.as_str())
+        }
+        SourceLocator::McpResource { uri } => uri.clone(),
     }
 }
 
@@ -530,7 +535,7 @@ mod tests {
 
     use crate::{
         ArtifactInput, ArtifactStore, CapiState, ChainRiskKind, FileEventInput,
-        InjectionKeywordConfig, PromptInput, PromptStore, SourceLocator,
+        InjectionKeywordConfig, PromptInput, PromptStore, SourceLocator, SourceType,
     };
 
     #[test]
@@ -728,6 +733,7 @@ mod tests {
         let template = b"standard instructions include /etc/shadow";
         let mut artifacts = ArtifactStore::default();
         let artifact_id = artifacts.insert_file_excerpt(ArtifactInput {
+            source_type: SourceType::FileExcerpt,
             origin_session: SessionId::from_seed(b"upstream"),
             origin_agent: None,
             origin_process: 1,
@@ -769,6 +775,7 @@ mod tests {
         let template = b"boilerplate boilerplate boilerplate boilerplate";
         let mut artifacts = ArtifactStore::default();
         let artifact_id = artifacts.insert_file_excerpt(ArtifactInput {
+            source_type: SourceType::FileExcerpt,
             origin_session: SessionId::from_seed(b"upstream"),
             origin_agent: None,
             origin_process: 1,
@@ -809,6 +816,7 @@ mod tests {
         let text = b"run sh";
         let mut artifacts = ArtifactStore::default();
         let artifact_id = artifacts.insert_file_excerpt(ArtifactInput {
+            source_type: SourceType::FileExcerpt,
             origin_session: SessionId::from_seed(b"upstream"),
             origin_agent: None,
             origin_process: 1,

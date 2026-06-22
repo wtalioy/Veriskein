@@ -9,7 +9,9 @@ use crate::base::{
 };
 use crate::deadloop::DeadloopDetector;
 use crate::finding::{Finding, FindingEvidence, PromptEvidenceState};
+use crate::mcp::detect_mcp_tool_spoofing;
 use crate::signals::materialize_signals;
+use veriskein_content::McpToolSpoofing;
 
 #[derive(Debug, Default)]
 pub struct DetectorEngine {
@@ -37,6 +39,23 @@ impl DetectorEngine {
         dry_run_exec_observed: bool,
         prompt_evidence: &[PromptEvidence],
     ) -> Vec<Finding> {
+        self.detect_with_prompt_and_mcp_evidence(
+            event,
+            graph,
+            dry_run_exec_observed,
+            prompt_evidence,
+            &[],
+        )
+    }
+
+    pub fn detect_with_prompt_and_mcp_evidence(
+        &mut self,
+        event: &NormalizedEvent,
+        graph: &GraphState,
+        dry_run_exec_observed: bool,
+        prompt_evidence: &[PromptEvidence],
+        mcp_anomalies: &[McpToolSpoofing],
+    ) -> Vec<Finding> {
         let Some(binding) = graph
             .resolve(event.process.pid)
             .filter(|binding| binding.is_confirmed())
@@ -60,6 +79,7 @@ impl DetectorEngine {
         {
             out.push(finding);
         }
+        out.extend(detect_mcp_tool_spoofing(event, binding, mcp_anomalies));
         if out.is_empty() && dry_run_exec_observed {
             if let Some(finding) = detect_exec_observed(event, binding) {
                 out.push(finding);

@@ -41,6 +41,10 @@ fn round_trips_welcome_frame_with_default_queue_policy() {
         QueuePolicy::default().client_slow_timeout_ms,
         IPC_CLIENT_SLOW_TIMEOUT_MS
     );
+    assert_eq!(
+        QueuePolicy::default().alerts_overflow,
+        QueueOverflowPolicy::DropClientOnLag
+    );
 }
 
 #[test]
@@ -75,13 +79,46 @@ fn round_trips_metrics_frame() {
     let mut metrics = MetricsSnapshot::new(42);
     metrics.counters.insert("alerts_sent".to_string(), 7);
     metrics.gauges.insert("drop_rate".to_string(), 0.25);
-    metrics.queue_depths = QueueDepths { alerts: 3 };
+    metrics.queue_depths = QueueDepths {
+        alerts: 3,
+        events: 2,
+    };
     let frame = IpcFrame::Metrics(MetricsFrame::new(metrics));
 
     assert_eq!(
         decode_ndjson(&encode_ndjson(&frame).expect("encode frame")).expect("decode"),
         frame
     );
+}
+
+#[test]
+fn round_trips_event_graph_query_and_reply_frames() {
+    let event = IpcFrame::Event(EventFrame::new(
+        "evt-1",
+        10,
+        "proc_exec",
+        42,
+        Some("session-1".to_string()),
+        json!({"argv":["agent"]}),
+    ));
+    let graph = IpcFrame::Graph(GraphFrame::new(
+        11,
+        json!({"op":"bind","pid":42,"role":"root_agent"}),
+    ));
+    let query = IpcFrame::Query(QueryFrame::new("q-1", Topic::Events));
+    let reply = IpcFrame::Reply(ReplyFrame::ok(
+        "q-1",
+        Topic::Events,
+        vec![json!({"event_id":"evt-1"})],
+    ));
+    let dropped = IpcFrame::EventsDropped(EventsDroppedFrame::new(12, 3, "client_lagged"));
+
+    for frame in [event, graph, query, reply, dropped] {
+        assert_eq!(
+            decode_ndjson(&encode_ndjson(&frame).expect("encode frame")).expect("decode"),
+            frame
+        );
+    }
 }
 
 #[test]
@@ -139,4 +176,18 @@ fn rejects_empty_and_multiline_ndjson() {
         decode_ndjson("{\"topic\":\"hello\"}\n{\"topic\":\"metrics\"}"),
         Err(IpcError::MultilineFrame)
     ));
+}
+
+#[test]
+fn decodes_minimal_documented_hello_with_provisional_topic() {
+    let frame =
+        decode_ndjson(r#"{"kind":"hello","ipc_version":1,"subscribe":["alerts","events"]}"#)
+            .expect("decode minimal hello");
+
+    let IpcFrame::Hello(hello) = frame else {
+        panic!("expected hello");
+    };
+    assert_eq!(hello.schema_version, SCHEMA_VERSION);
+    assert_eq!(hello.client_name, "unknown");
+    assert_eq!(hello.subscriptions, vec![Topic::Alert, Topic::Events]);
 }

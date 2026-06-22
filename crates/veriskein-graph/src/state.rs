@@ -228,10 +228,13 @@ impl GraphState {
         event: &NormalizedEvent,
         filename: &str,
     ) -> Role {
+        let name = path_basename(filename);
+        if is_mcp_process(name, event) {
+            return Role::McpServer;
+        }
         if event.process.pid == attribution.root_pid {
             return Role::RootAgent;
         }
-        let name = path_basename(filename);
         if matches!(name, "sh" | "bash" | "zsh" | "dash" | "fish")
             && self
                 .resolve(event.process.ppid)
@@ -299,7 +302,7 @@ impl GraphState {
             workspace,
             root_pid: event.process.pid,
             state: SessionState::RootCandidate,
-            role: Role::RootAgent,
+            role: Role::Unknown,
             role_version: 1,
             role_tags: Vec::new(),
             attribution_strength: strength_for_evidence(&evidence),
@@ -308,6 +311,7 @@ impl GraphState {
                 event.ts_ns + defaults::secs_to_ns(defaults::AGENT_PROMOTION_WINDOW_S),
             ),
         };
+        attribution.role = self.classify_role(&attribution, event, filename);
         self.confirm_if_ready(&mut attribution);
         self.bindings.insert(event.process.pid, attribution.clone());
         Some(attribution)
@@ -564,6 +568,17 @@ fn weak_signal_count(evidence: &[RootEvidence]) -> usize {
     kinds.len()
 }
 
+fn is_mcp_process(name: &str, event: &NormalizedEvent) -> bool {
+    if name.to_ascii_lowercase().contains("mcp") {
+        return true;
+    }
+    let NormalizedData::ProcExec { argv, .. } = &event.data else {
+        return false;
+    };
+    argv.iter()
+        .any(|arg| arg.to_ascii_lowercase().contains("mcp"))
+}
+
 fn strength_for_evidence(evidence: &[RootEvidence]) -> AttributionStrength {
     if has_binary_seed(evidence) {
         AttributionStrength::Strong
@@ -580,7 +595,7 @@ fn role_rank(role: Role) -> u8 {
         Role::SubAgent => 1,
         Role::ToolWorker => 2,
         Role::ShellTool => 3,
-        Role::McpServer => 4,
-        Role::RootAgent => 5,
+        Role::RootAgent => 4,
+        Role::McpServer => 5,
     }
 }

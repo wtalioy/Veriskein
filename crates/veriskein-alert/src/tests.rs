@@ -66,6 +66,40 @@ fn finding_projection_is_schema_valid() {
 }
 
 #[test]
+fn mcp_tool_spoofing_projection_is_schema_valid() {
+    let mut finding = finding(FindingType::McpToolSpoofing);
+    finding.reason_code = "mcp_tool_name_collision".to_string();
+    finding.summary =
+        "MCP server browser advertised tool read_file already registered by filesystem".to_string();
+    finding.objects = FindingObjects {
+        event_ids: vec!["mcp-evt".to_string()],
+        argv: vec!["mcp-server".to_string()],
+        ..FindingObjects::default()
+    };
+    finding.evidence = vec![FindingEvidence {
+        kind: "mcp_registry".to_string(),
+        event_id: "mcp-evt".to_string(),
+        ingest_seq: 1,
+        path: None,
+        ip: None,
+        port: None,
+        score: Some(0.72),
+        src: Some("filesystem".to_string()),
+        dst: Some("browser".to_string()),
+        op: Some("read_file".to_string()),
+        note: Some("mcp_tool_name_collision".to_string()),
+    }];
+
+    let value = AlertRecord::try_from_finding(&finding)
+        .expect("valid finding")
+        .as_value()
+        .expect("value");
+
+    assert_eq!(value["type"], "mcp_tool_spoofing");
+    validate(&value).expect("schema valid");
+}
+
+#[test]
 fn visibility_state_mapping_is_centralized() {
     let mut finding = finding(FindingType::SensitiveFileAccess);
 

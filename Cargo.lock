@@ -1910,6 +1910,7 @@ name = "veriskein-detectors"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "veriskein-content",
  "veriskein-correlator",
  "veriskein-graph",
  "veriskein-normalizer",

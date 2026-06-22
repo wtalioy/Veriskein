@@ -203,6 +203,30 @@ fn exit_keeps_process_snapshot_for_late_events() {
 }
 
 #[test]
+fn bounded_expiring_processes_evict_oldest_exit_first() {
+    let mut norm = normalizer();
+    norm.apply(1, &exec(1, 1080));
+    norm.apply(2, &exec(2, 1081));
+    norm.apply(3, &parse_owned(fixture(3, 1080).exit(0)));
+    norm.apply(4, &parse_owned(fixture(4, 1081).exit(0)));
+
+    norm.enforce_process_bounds_to(norm.process_snapshots().len() + 1);
+
+    let older = norm.apply(
+        5,
+        &parse_owned(fixture(5, 1080).open(-100, 3, "/tmp/veriskein-ws/older.txt")),
+    );
+    let newer = norm.apply(
+        6,
+        &parse_owned(fixture(6, 1081).open(-100, 3, "/tmp/veriskein-ws/newer.txt")),
+    );
+
+    assert_eq!(older[0].process.exe, "");
+    assert_eq!(newer[0].process.exe, "/usr/bin/claude");
+    assert_eq!(norm.evicted_process_detail_total(), 1);
+}
+
+#[test]
 fn process_snapshots_expose_bootstrap_and_live_state() {
     let mut norm = normalizer();
     norm.apply(1, &exec(1, 118));

@@ -26,6 +26,7 @@ pub enum FindingType {
     OutOfWorkspaceDeletion,
     SingleAgentDeadloop,
     CrossAgentPromptInjection,
+    McpToolSpoofing,
     ExecObserved,
 }
 
@@ -37,6 +38,7 @@ impl FindingType {
             Self::OutOfWorkspaceDeletion => "out_of_workspace_deletion",
             Self::SingleAgentDeadloop => "single_agent_deadloop",
             Self::CrossAgentPromptInjection => "cross_agent_prompt_injection",
+            Self::McpToolSpoofing => "mcp_tool_spoofing",
             Self::ExecObserved => "exec_observed",
         }
     }

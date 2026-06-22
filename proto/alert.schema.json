@@ -62,7 +62,8 @@
         "sensitive_file_access",
         "out_of_workspace_deletion",
         "single_agent_deadloop",
-        "cross_agent_prompt_injection"
+        "cross_agent_prompt_injection",
+        "mcp_tool_spoofing"
       ]
     },
     "severity": { "enum": ["low", "medium", "high", "critical"] },
@@ -101,7 +102,7 @@
         "required": ["kind", "event_id", "ingest_seq"],
         "properties": {
           "kind": {
-            "enum": ["excerpt_match", "syscall", "file_access", "net_connect", "prompt_ref", "artifact_ref", "heuristic"]
+            "enum": ["excerpt_match", "syscall", "file_access", "net_connect", "prompt_ref", "artifact_ref", "heuristic", "mcp_registry"]
           },
           "event_id": { "type": "string", "minLength": 1 },
           "ingest_seq": { "type": "integer", "minimum": 0 },

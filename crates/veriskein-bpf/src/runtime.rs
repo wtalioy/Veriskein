@@ -1,21 +1,25 @@
 use std::collections::BTreeSet;
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use libbpf_rs::{
-    ErrorKind as BpfErrorKind, Link, MapCore, Object, ObjectBuilder, RingBufferBuilder, UprobeOpts,
+    ErrorKind as BpfErrorKind, Link, MapCore, MapFlags, Object, ObjectBuilder, RingBufferBuilder,
+    UprobeOpts,
 };
+use veriskein_proto::ContentChannel;
 
 const PROC_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/proc.bpf.o"));
 const FS_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fs.bpf.o"));
 const NET_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/net.bpf.o"));
 const TLS_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tls_uprobe.bpf.o"));
+const CONTENT_IO_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/content_io.bpf.o"));
 
 #[derive(Debug, Clone)]
 pub struct BpfRuntimeConfig {
@@ -41,8 +45,35 @@ struct LoadedObject {
 
 pub struct RuntimeEventSource {
     rx: Receiver<Vec<u8>>,
+    command_tx: Sender<ContentIoCommand>,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<Result<()>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct FdCaptureKey {
+    pub tgid: u32,
+    pub fd: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct FdCapturePolicy {
+    pub channel: u8,
+    pub _reserved: [u8; 7],
+    pub expires_at_ns: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentIoCommand {
+    Upsert {
+        key: FdCaptureKey,
+        policy: FdCapturePolicy,
+    },
+    Delete {
+        key: FdCaptureKey,
+    },
 }
 
 impl RuntimeEventSource {
@@ -52,6 +83,7 @@ impl RuntimeEventSource {
 
     pub fn start_with_config(config: BpfRuntimeConfig) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
         let openssl_libraries = discover_openssl_libraries(&config)?;
@@ -65,6 +97,10 @@ impl RuntimeEventSource {
                     .iter()
                     .position(|loaded| loaded.name == "tls_uprobe")
                     .context("find tls_uprobe BPF object")?;
+                let content_io_index = objects
+                    .iter()
+                    .position(|loaded| loaded.name == "content_io")
+                    .context("find content_io BPF object")?;
 
                 // Attach every program before building the ring buffer so probe
                 // activation is all-or-nothing from the daemon's perspective.
@@ -115,6 +151,7 @@ impl RuntimeEventSource {
                 let ringbuf = builder.build().context("build ringbuf")?;
 
                 while !worker_shutdown.load(Ordering::Relaxed) {
+                    drain_content_io_commands(&mut objects[content_io_index].object, &command_rx)?;
                     match ringbuf.poll(Duration::from_millis(
                         veriskein_proto::defaults::RINGBUF_POLL_INTERVAL_MS,
                     )) {
@@ -132,9 +169,44 @@ impl RuntimeEventSource {
 
         Ok(Self {
             rx,
+            command_tx,
             shutdown,
             worker: Some(worker),
         })
+    }
+
+    pub fn upsert_content_capture(
+        &self,
+        tgid: u32,
+        fd: i32,
+        channel: ContentChannel,
+        expires_at_ns: u64,
+    ) -> Result<()> {
+        if fd < 0 {
+            return Ok(());
+        }
+        let command = ContentIoCommand::Upsert {
+            key: FdCaptureKey { tgid, fd },
+            policy: FdCapturePolicy {
+                channel: channel as u8,
+                _reserved: [0; 7],
+                expires_at_ns,
+            },
+        };
+        self.command_tx
+            .send(command)
+            .context("send content capture whitelist update")
+    }
+
+    pub fn delete_content_capture(&self, tgid: u32, fd: i32) -> Result<()> {
+        if fd < 0 {
+            return Ok(());
+        }
+        self.command_tx
+            .send(ContentIoCommand::Delete {
+                key: FdCaptureKey { tgid, fd },
+            })
+            .context("send content capture whitelist delete")
     }
 
     pub fn try_recv(&mut self) -> Result<Option<Vec<u8>>> {
@@ -189,6 +261,7 @@ fn load_objects(ringbuf_size: usize) -> Result<Vec<LoadedObject>> {
         ("fs", FS_BPF_OBJECT),
         ("net", NET_BPF_OBJECT),
         ("tls_uprobe", TLS_BPF_OBJECT),
+        ("content_io", CONTENT_IO_BPF_OBJECT),
     ]
     .into_iter()
     .map(|(name, bytes)| {
@@ -210,6 +283,40 @@ fn load_objects(ringbuf_size: usize) -> Result<Vec<LoadedObject>> {
         Ok(LoadedObject { name, object })
     })
     .collect()
+}
+
+fn drain_content_io_commands(
+    object: &mut Object,
+    command_rx: &Receiver<ContentIoCommand>,
+) -> Result<()> {
+    while let Ok(command) = command_rx.try_recv() {
+        apply_content_io_command(object, command)?;
+    }
+    Ok(())
+}
+
+fn apply_content_io_command(object: &mut Object, command: ContentIoCommand) -> Result<()> {
+    let map = object
+        .maps()
+        .find(|map| map.name().to_string_lossy() == "fd_capture_whitelist")
+        .context("find content_io fd_capture_whitelist map")?;
+    match command {
+        ContentIoCommand::Upsert { key, policy } => map
+            .update(as_bytes(&key), as_bytes(&policy), MapFlags::ANY)
+            .context("update content_io fd_capture_whitelist"),
+        ContentIoCommand::Delete { key } => {
+            if let Err(err) = map.delete(as_bytes(&key)) {
+                if !err.to_string().contains("No such file") {
+                    return Err(err).context("delete content_io fd_capture_whitelist entry");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn as_bytes<T>(value: &T) -> &[u8] {
+    unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
 }
 
 fn attach_openssl_programs(

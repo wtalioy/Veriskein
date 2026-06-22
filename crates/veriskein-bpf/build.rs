@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         repo_root.join("bpf/common.h").display()
     );
 
-    for stem in ["proc", "fs", "net", "tls_uprobe"] {
+    for stem in ["proc", "fs", "net", "tls_uprobe", "content_io"] {
         let source = repo_root.join(format!("bpf/{stem}.bpf.c"));
         let obj = out_dir.join(format!("{stem}.bpf.o"));
         println!("cargo:rerun-if-changed={}", source.display());

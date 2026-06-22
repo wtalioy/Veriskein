@@ -7,4 +7,8 @@ soname_allowlist = []
 [ipc]
 allow_uids = []
 
+[content_capture]
+stdio = false
+mcp_stdio = false
+
 [limits]

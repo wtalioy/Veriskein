@@ -1,3 +1,4 @@
+use veriskein_content::McpToolSpoofing;
 use veriskein_graph::{AgentConfig, GraphState};
 use veriskein_normalizer::{
     NormalizedData, NormalizedEvent, PathContext, PathResolution, PathResolutionMode, PathVerdict,
@@ -652,4 +653,37 @@ fn repeated_prompt_signal_does_not_attach_to_base_findings() {
             .iter()
             .all(|evidence| evidence.kind != "prompt_ref")
     );
+}
+
+#[test]
+fn mcp_tool_spoofing_anomaly_emits_finding() {
+    let graph = graph();
+    let event = event(
+        EventKind::ProcExec,
+        "mcp-evt",
+        process(TEST_PID, "/usr/bin/mcp-server", "mcp-server", "/tmp/ws"),
+        NormalizedData::ProcExec {
+            filename: "/usr/bin/mcp-server".to_string(),
+            argv: vec!["mcp-server".to_string()],
+        },
+    );
+    let anomaly = McpToolSpoofing {
+        tool_name: "read_file".to_string(),
+        claimed_server: "browser".to_string(),
+        registered_server: "filesystem".to_string(),
+        reason: "mcp_tool_name_collision".to_string(),
+    };
+
+    let findings = DetectorEngine::new().detect_with_prompt_and_mcp_evidence(
+        &event,
+        &graph,
+        false,
+        &[],
+        &[anomaly],
+    );
+
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].finding_type, FindingType::McpToolSpoofing);
+    assert_eq!(findings[0].evidence[0].kind, "mcp_registry");
+    assert_eq!(findings[0].evidence[0].op.as_deref(), Some("read_file"));
 }

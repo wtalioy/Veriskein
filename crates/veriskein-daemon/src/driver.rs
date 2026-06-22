@@ -10,16 +10,16 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::oneshot::{self, error::TryRecvError};
 use tracing::info;
 use veriskein_alert::{
-    DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF, DEGRADATION_SOURCE_RINGBUF_DROP_RATE,
-    PressureLevel, RuntimeHealth, stdout_sink,
+    DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF, DEGRADATION_SOURCE_RETENTION_EVICTION,
+    DEGRADATION_SOURCE_RINGBUF_DROP_RATE, PressureLevel, RuntimeHealth, stdout_sink,
 };
 use veriskein_bpf::{BpfRuntimeConfig, RuntimeEventSource};
 use veriskein_collector::CollectorCounters;
-use veriskein_ipc::{QueuePolicy, default_socket_path};
+use veriskein_ipc::{EventFrame, GraphFrame, QueuePolicy, default_socket_path};
 
 use crate::Cli;
 use crate::ipc::{IpcServer, IpcSettings};
-use crate::pipeline::RuntimePipeline;
+use crate::pipeline::{ContentCaptureSettings, ContentCaptureUpdate, RuntimePipeline};
 use crate::preflight::preflight;
 
 const METRICS_EMIT_INTERVAL: Duration = Duration::from_secs(1);
@@ -49,6 +49,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         sink,
         cli,
         &config_root,
+        load_content_capture_settings(&config_root)?,
         initial_runtime_health(&bpf_config),
         ipc,
         Shutdown::Signal(sigterm),
@@ -77,6 +78,8 @@ struct DefaultsConfig {
     ipc: IpcConfig,
     #[serde(default)]
     limits: LimitsConfig,
+    #[serde(default)]
+    content_capture: ContentCaptureConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -106,6 +109,14 @@ struct LimitsConfig {
     ipc_client_slow_timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ContentCaptureConfig {
+    #[serde(default)]
+    stdio: bool,
+    #[serde(default)]
+    mcp_stdio: bool,
+}
+
 fn load_bpf_runtime_config(config_root: &Path, cli: &Cli) -> Result<BpfRuntimeConfig> {
     let mut config = BpfRuntimeConfig::default();
     if let Some(defaults) = load_defaults_config(config_root)? {
@@ -129,6 +140,16 @@ fn load_ipc_config(config_root: &Path) -> Result<IpcSettings> {
         return Ok(IpcSettings::default());
     };
     Ok(ipc_settings_from_defaults(defaults))
+}
+
+fn load_content_capture_settings(config_root: &Path) -> Result<ContentCaptureSettings> {
+    let Some(defaults) = load_defaults_config(config_root)? else {
+        return Ok(ContentCaptureSettings::default());
+    };
+    Ok(ContentCaptureSettings {
+        stdio_enabled: defaults.content_capture.stdio,
+        mcp_stdio_enabled: defaults.content_capture.mcp_stdio,
+    })
 }
 
 fn load_defaults_config(config_root: &Path) -> Result<Option<DefaultsConfig>> {
@@ -156,6 +177,7 @@ fn ipc_settings_from_defaults(defaults: DefaultsConfig) -> IpcSettings {
                 .limits
                 .ipc_client_slow_timeout_ms
                 .unwrap_or(default_policy.client_slow_timeout_ms),
+            alerts_overflow: default_policy.alerts_overflow,
         },
     }
 }
@@ -288,7 +310,7 @@ impl RuntimeHealthTracker {
         &self.health
     }
 
-    fn maybe_update(&mut self, counters: &CollectorCounters) {
+    fn maybe_update(&mut self, counters: &CollectorCounters, detail_evictions_total: u64) {
         let Some(delta) = self
             .counters
             .snapshot_if_due(counters, HEALTH_UPDATE_INTERVAL)
@@ -300,16 +322,32 @@ impl RuntimeHealthTracker {
         } else {
             delta.drops as f32 / delta.raw_events as f32
         };
+        let mut sources = Vec::new();
+        if self
+            .health
+            .degradation_sources
+            .iter()
+            .any(|source| source == DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF)
+        {
+            sources.push(DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF.to_string());
+        }
         if drop_rate >= veriskein_proto::defaults::DROP_RATE_DEGRADE_THRESHOLD {
+            sources.push(DEGRADATION_SOURCE_RINGBUF_DROP_RATE.to_string());
+        }
+        if detail_evictions_total > 0 {
+            sources.push(DEGRADATION_SOURCE_RETENTION_EVICTION.to_string());
+        }
+        if sources.is_empty() {
+            self.health = RuntimeHealth::full();
+        } else {
             self.health = RuntimeHealth {
                 pressure: PressureLevel::Degraded,
                 drop_rate,
-                degradation_sources: vec![DEGRADATION_SOURCE_RINGBUF_DROP_RATE.to_string()],
+                degradation_sources: sources,
             };
-        } else if self.health.degradation_sources == [DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF] {
+        }
+        if self.health.degradation_sources == [DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF] {
             self.health.drop_rate = drop_rate;
-        } else {
-            self.health = RuntimeHealth::full();
         }
     }
 }
@@ -328,12 +366,38 @@ fn initial_runtime_health(config: &BpfRuntimeConfig) -> RuntimeHealth {
 
 trait EventSource {
     fn try_recv(&mut self) -> Result<Option<Vec<u8>>>;
+    fn upsert_content_capture(
+        &mut self,
+        _pid: u32,
+        _fd: i32,
+        _channel: veriskein_proto::ContentChannel,
+        _expires_at_ns: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn delete_content_capture(&mut self, _pid: u32, _fd: i32) -> Result<()> {
+        Ok(())
+    }
     fn shutdown(&mut self) -> Result<()>;
 }
 
 impl EventSource for RuntimeEventSource {
     fn try_recv(&mut self) -> Result<Option<Vec<u8>>> {
         RuntimeEventSource::try_recv(self)
+    }
+
+    fn upsert_content_capture(
+        &mut self,
+        pid: u32,
+        fd: i32,
+        channel: veriskein_proto::ContentChannel,
+        expires_at_ns: u64,
+    ) -> Result<()> {
+        RuntimeEventSource::upsert_content_capture(self, pid, fd, channel, expires_at_ns)
+    }
+
+    fn delete_content_capture(&mut self, pid: u32, fd: i32) -> Result<()> {
+        RuntimeEventSource::delete_content_capture(self, pid, fd)
     }
 
     fn shutdown(&mut self) -> Result<()> {
@@ -375,6 +439,7 @@ async fn run_with_source_and_sink<S>(
     mut sink: Box<dyn Write + Send>,
     cli: Cli,
     config_root: &Path,
+    content_capture: ContentCaptureSettings,
     initial_health: RuntimeHealth,
     ipc: Option<IpcServer>,
     mut shutdown: Shutdown,
@@ -382,7 +447,8 @@ async fn run_with_source_and_sink<S>(
 where
     S: EventSource + Send + 'static,
 {
-    let mut pipeline = RuntimePipeline::new(config_root, &cli.workspaces)?;
+    let mut pipeline =
+        RuntimePipeline::new_with_content_capture(config_root, &cli.workspaces, content_capture)?;
     let mut health = RuntimeHealthTracker::new(initial_health);
     let mut metrics = MetricsTick::new();
 
@@ -407,10 +473,30 @@ where
                                 pipeline.process_raw_event_bytes(&raw, &mut *sink, cli.dry_run)?;
                             metrics.add_detector_fires(alerts.len());
                             if let Some(ipc) = &ipc {
+                                for event in pipeline.drain_ipc_events() {
+                                    ipc.publish_event(EventFrame::new(
+                                        event.event_id,
+                                        event.ts_ns,
+                                        event.event_kind,
+                                        event.pid,
+                                        event.session_id,
+                                        event.event,
+                                    ));
+                                }
+                                for graph in pipeline.drain_ipc_graph() {
+                                    ipc.publish_graph(GraphFrame::new(graph.ts_ns, graph.graph));
+                                }
                                 for alert in alerts {
                                     ipc.publish_alert(alert.as_value()?);
                                 }
+                            } else {
+                                let _ = pipeline.drain_ipc_events();
+                                let _ = pipeline.drain_ipc_graph();
                             }
+                            apply_content_capture_updates(
+                                &mut source,
+                                pipeline.drain_content_capture_updates(),
+                            )?;
                         }
                         Ok(None) => break,
                         Err(err) => return Err(err),
@@ -427,7 +513,10 @@ where
                         sample.detector_fires_per_s,
                     );
                 }
-                health.maybe_update(pipeline.collector_counters());
+                health.maybe_update(
+                    pipeline.collector_counters(),
+                    pipeline.retained_detail_evictions_total(),
+                );
                 pipeline.maybe_refresh_endpoint_ips();
             }
         }
@@ -437,6 +526,24 @@ where
         ipc.shutdown().await;
     }
     sink.flush().context("flush alert sink")?;
+    Ok(())
+}
+
+fn apply_content_capture_updates<S: EventSource>(
+    source: &mut S,
+    updates: Vec<ContentCaptureUpdate>,
+) -> Result<()> {
+    for update in updates {
+        match update {
+            ContentCaptureUpdate::Upsert {
+                pid,
+                fd,
+                channel,
+                expires_at_ns,
+            } => source.upsert_content_capture(pid, fd, channel, expires_at_ns)?,
+            ContentCaptureUpdate::Delete { pid, fd } => source.delete_content_capture(pid, fd)?,
+        }
+    }
     Ok(())
 }
 
@@ -517,6 +624,7 @@ mod tests {
                     no_ipc: true,
                 },
                 &config_root(),
+                super::ContentCaptureSettings::default(),
                 veriskein_alert::RuntimeHealth::full(),
                 None,
                 Shutdown::Oneshot(shutdown_rx),

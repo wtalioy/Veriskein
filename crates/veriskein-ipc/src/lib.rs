@@ -11,8 +11,9 @@ mod ndjson;
 mod tests;
 
 pub use frame::{
-    AlertFrame, DEFAULT_SOCKET_NAME, ErrorCode, ErrorFrame, HelloFrame, IPC_ALERTS_QUEUE,
-    IPC_CLIENT_SLOW_TIMEOUT_MS, IPC_VERSION, IpcFrame, MetricsFrame, MetricsSnapshot, QueueDepths,
-    QueuePolicy, SCHEMA_VERSION, Topic, VersionMismatch, WelcomeFrame, default_socket_path,
+    AlertFrame, DEFAULT_SOCKET_NAME, ErrorCode, ErrorFrame, EventFrame, EventsDroppedFrame,
+    GraphFrame, HelloFrame, IPC_ALERTS_QUEUE, IPC_CLIENT_SLOW_TIMEOUT_MS, IPC_VERSION, IpcFrame,
+    MetricsFrame, MetricsSnapshot, QueryFrame, QueueDepths, QueueOverflowPolicy, QueuePolicy,
+    ReplyFrame, SCHEMA_VERSION, Topic, VersionMismatch, WelcomeFrame, default_socket_path,
 };
 pub use ndjson::{IpcError, IpcResult, decode_ndjson, encode_ndjson};

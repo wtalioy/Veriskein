@@ -10,23 +10,41 @@ use crate::{RedactionMode, redact_excerpt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum SourceType {
     FileExcerpt,
+    StdinFrag,
+    PipeFrag,
+    UpstreamResponse,
+    McpResource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum SourceLocator {
-    WorkspaceFile { path: String },
+    WorkspaceFile {
+        path: String,
+    },
+    FdStream {
+        stream_id: u64,
+        channel: veriskein_proto::ContentChannel,
+    },
+    McpResource {
+        uri: String,
+    },
 }
 
 impl SourceLocator {
-    pub fn path(&self) -> &str {
+    pub fn stable_key(&self) -> String {
         match self {
-            Self::WorkspaceFile { path } => path,
+            Self::WorkspaceFile { path } => path.clone(),
+            Self::FdStream { stream_id, channel } => {
+                format!("fd-stream:{}:{stream_id}", channel.as_str())
+            }
+            Self::McpResource { uri } => uri.clone(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactInput {
+    pub source_type: SourceType,
     pub origin_session: SessionId,
     pub origin_agent: Option<AgentId>,
     pub origin_process: u32,
@@ -70,12 +88,19 @@ impl Default for ArtifactStore {
 
 impl ArtifactStore {
     pub fn insert_file_excerpt(&mut self, input: ArtifactInput) -> ArtifactId {
+        self.insert_artifact(ArtifactInput {
+            source_type: SourceType::FileExcerpt,
+            ..input
+        })
+    }
+
+    pub fn insert_artifact(&mut self, input: ArtifactInput) -> ArtifactId {
         let signature = ContentSignature::new(&input.excerpt);
         let id = ArtifactId::from_seed(
             format!(
                 "{}:{}:{}",
                 input.origin_session.hex(),
-                input.source_locator.path(),
+                input.source_locator.stable_key(),
                 hex16(signature.hash_norm)
             )
             .as_bytes(),
@@ -86,7 +111,7 @@ impl ArtifactStore {
             origin_session: input.origin_session,
             origin_agent: input.origin_agent,
             origin_process: input.origin_process,
-            source_type: SourceType::FileExcerpt,
+            source_type: input.source_type,
             source_locator: input.source_locator.clone(),
             ts_ns: input.ts_ns,
             excerpt: input.excerpt,
@@ -147,6 +172,7 @@ mod tests {
         let session = SessionId::from_seed(b"upstream");
         let mut store = ArtifactStore::default();
         let id = store.insert_file_excerpt(ArtifactInput {
+            source_type: super::SourceType::FileExcerpt,
             origin_session: session,
             origin_agent: None,
             origin_process: 42,

@@ -5,6 +5,7 @@ mod capi;
 mod deadloop;
 mod engine;
 mod finding;
+mod mcp;
 mod signals;
 #[cfg(test)]
 mod tests;
@@ -15,3 +16,4 @@ pub use finding::{
     Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
     VisibilityState,
 };
+pub use mcp::detect_mcp_tool_spoofing;

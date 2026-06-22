@@ -11,6 +11,7 @@ use veriskein_proto::{
 
 pub const DEGRADATION_SOURCE_RINGBUF_DROP_RATE: &str = "ringbuf_drop_rate";
 pub const DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF: &str = "configured_small_ringbuf";
+pub const DEGRADATION_SOURCE_RETENTION_EVICTION: &str = "retention_eviction";
 pub(crate) const ALERT_DETECTOR_VERSION: u32 = 1;
 pub(crate) const ALERT_POLICY_VERSION: u32 = 1;
 
@@ -277,6 +278,7 @@ fn policy_for(finding: &Finding, runtime: &RuntimeHealth) -> (&'static str, &'st
                 ("high", "medium", score)
             }
         }
+        FindingType::McpToolSpoofing => ("high", "medium", 0.72),
         FindingType::ExecObserved => ("low", "strong", 1.0),
     };
     if finding.health.visibility_state == VisibilityState::Full && !runtime.pressure.is_degraded() {
@@ -476,6 +478,13 @@ fn valid_finding(finding: &Finding) -> bool {
                     .evidence
                     .iter()
                     .any(|evidence| evidence.kind == "syscall")
+        }
+        FindingType::McpToolSpoofing => {
+            finding
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == "mcp_registry" && evidence.op.is_some())
+                && !finding.objects.event_ids.is_empty()
         }
         FindingType::ExecObserved => finding.objects.paths.len() == 1,
     }
