@@ -1,0 +1,4 @@
+# Phase 5 forced-pressure degradation honesty guard.
+id = "G"
+timeout = "60s"
+workspace = "/tmp/ws"

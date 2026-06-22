@@ -1,4 +1,4 @@
-//! Connection and fd identity state for Phase 2+ stream ownership.
+//! Connection and fd identity state for stream ownership.
 
 mod state;
 #[cfg(test)]

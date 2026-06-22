@@ -15,7 +15,7 @@ use super::{NormalizedData, NormalizedEvent, Normalizer, ProcessSnapshot};
 impl Normalizer {
     pub fn apply(&mut self, ingest_seq: u64, event: &OwnedEvent) -> Vec<NormalizedEvent> {
         self.collect_expired(event.header().ts_ns);
-        match event {
+        let out = match event {
             OwnedEvent::ProcFork(evt) => self.on_proc_fork(ingest_seq, evt),
             OwnedEvent::ProcExec(evt) => vec![self.on_proc_exec(ingest_seq, evt)],
             OwnedEvent::ProcExit(evt) => self.on_proc_exit(ingest_seq, evt),
@@ -28,7 +28,9 @@ impl Normalizer {
             OwnedEvent::TlsAssoc(evt) => vec![self.on_tls_assoc(ingest_seq, evt)],
             OwnedEvent::ContentFrag(_) => Vec::new(),
             OwnedEvent::MetaDrop(_) => Vec::new(),
-        }
+        };
+        self.enforce_process_bounds();
+        out
     }
 
     fn snapshot_for(&self, pid: u32, fallback_header: &EventHeader) -> ProcessSnapshot {
@@ -84,6 +86,7 @@ impl Normalizer {
                 expired_at_ns: None,
             },
         );
+        self.note_process(evt.child_pid);
         vec![self.normalized_event(
             ingest_seq,
             EventKind::ProcFork,
@@ -127,6 +130,7 @@ impl Normalizer {
                 expired_at_ns: None,
             },
         );
+        self.note_process(pid);
 
         self.normalized_event(
             ingest_seq,
@@ -145,6 +149,7 @@ impl Normalizer {
         let pid = evt.header.pid;
         let snapshot = self.snapshot_for(pid, &evt.header);
         if let Some(mut exiting) = self.processes.remove(&pid) {
+            self.process_order.retain(|existing| *existing != pid);
             exiting.expired_at_ns = Some(evt.header.ts_ns.saturating_add(
                 veriskein_proto::defaults::ms_to_ns(
                     veriskein_proto::defaults::EXPIRING_PROC_HOLD_MS,
@@ -298,7 +303,8 @@ impl Normalizer {
             NormalizedData::NetConnect {
                 sockfd: evt.sockfd,
                 dport_be: evt.dport_be,
-                dst_ip: net_dst_ip(evt.family, evt.addr_dst),
+                dst_ip: veriskein_proto::net_addr_from_raw(evt.family, evt.addr_dst)
+                    .map(|ip| ip.to_string()),
                 dst_port: Some(u16::from_be(evt.dport_be)),
                 tls_candidate: evt.tls_candidate,
             },
@@ -344,16 +350,5 @@ impl Normalizer {
     fn collect_expired(&mut self, ts_ns: u64) {
         self.expiring
             .retain(|_, proc| proc.expired_at_ns.is_some_and(|until| until > ts_ns));
-    }
-}
-
-fn net_dst_ip(family: u16, addr_dst: [u8; 16]) -> Option<String> {
-    match family {
-        2 => Some(
-            std::net::Ipv4Addr::new(addr_dst[12], addr_dst[13], addr_dst[14], addr_dst[15])
-                .to_string(),
-        ),
-        10 => Some(std::net::Ipv6Addr::from(addr_dst).to_string()),
-        _ => None,
     }
 }

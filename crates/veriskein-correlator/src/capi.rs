@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -109,10 +109,14 @@ struct CandidateEntry {
 pub struct CapiState {
     artifacts: ArtifactStore,
     latest_file_lineage: BTreeMap<String, FileLineage>,
+    latest_file_lineage_order: VecDeque<String>,
     pending_downstream_reads: BTreeMap<SessionId, Vec<PendingRead>>,
     candidates: BTreeMap<CandidateKey, CandidateEntry>,
+    candidate_order: VecDeque<CandidateKey>,
     emitted_chains: BTreeSet<veriskein_proto::ChainId>,
+    emitted_chain_order: VecDeque<veriskein_proto::ChainId>,
     keywords: InjectionKeywordConfig,
+    evicted_detail_total: u64,
 }
 
 impl CapiState {
@@ -131,6 +135,9 @@ impl CapiState {
             return;
         }
         if input.is_write {
+            self.latest_file_lineage_order
+                .retain(|path| path != &input.path);
+            self.latest_file_lineage_order.push_back(input.path.clone());
             self.latest_file_lineage.insert(
                 input.path.clone(),
                 FileLineage {
@@ -141,6 +148,7 @@ impl CapiState {
                     excerpt: input.inline_excerpt.clone(),
                 },
             );
+            self.enforce_bounds();
         }
         if !input.is_read {
             return;
@@ -181,6 +189,7 @@ impl CapiState {
                 propagation_fact: propagation,
                 read_ts_ns: input.ts_ns,
             });
+        self.enforce_bounds();
     }
 
     pub fn observe_prompt(&mut self, prompt: PromptSnapshot) {
@@ -205,17 +214,21 @@ impl CapiState {
             else {
                 continue;
             };
+            let key = CandidateKey {
+                artifact_id: candidate.artifact_id,
+                prompt_id: candidate.prompt_id,
+            };
+            self.candidate_order.retain(|existing| existing != &key);
+            self.candidate_order.push_back(key.clone());
             self.candidates.insert(
-                CandidateKey {
-                    artifact_id: candidate.artifact_id,
-                    prompt_id: candidate.prompt_id,
-                },
+                key,
                 CandidateEntry {
                     candidate,
                     prompt_ts_ns: prompt.ts_start,
                 },
             );
         }
+        self.enforce_bounds();
     }
 
     pub fn chains_for_risky_event(
@@ -265,6 +278,7 @@ impl CapiState {
                 continue;
             };
             if self.emitted_chains.insert(chain.id) {
+                self.emitted_chain_order.push_back(chain.id);
                 out.push(chain);
             }
         }
@@ -273,6 +287,10 @@ impl CapiState {
 
     pub fn artifact(&self, artifact_id: veriskein_proto::ArtifactId) -> Option<&SourceArtifact> {
         self.artifacts.get(artifact_id)
+    }
+
+    pub fn evicted_detail_total(&self) -> u64 {
+        self.evicted_detail_total
     }
 
     fn prune(&mut self, now_ns: u64) {
@@ -284,6 +302,70 @@ impl CapiState {
             .retain(|_, reads| !reads.is_empty());
         self.candidates
             .retain(|_, entry| entry.prompt_ts_ns.saturating_add(max_age_ns) >= now_ns);
+        self.enforce_bounds();
+    }
+
+    fn enforce_bounds(&mut self) {
+        while self.latest_file_lineage.len() > veriskein_proto::defaults::MAX_ARTIFACTS {
+            let Some(path) = self.latest_file_lineage_order.pop_front() else {
+                break;
+            };
+            if self.latest_file_lineage.remove(&path).is_some() {
+                self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
+            }
+        }
+        let mut pending_total = self
+            .pending_downstream_reads
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        while pending_total > veriskein_proto::defaults::MAX_ARTIFACTS {
+            let Some(session_id) = self
+                .pending_downstream_reads
+                .iter_mut()
+                .min_by_key(|(_, reads)| {
+                    reads
+                        .first()
+                        .map(|read| read.read_ts_ns)
+                        .unwrap_or(u64::MAX)
+                })
+                .and_then(|(session_id, reads)| {
+                    if reads.is_empty() {
+                        None
+                    } else {
+                        reads.remove(0);
+                        Some(*session_id)
+                    }
+                })
+            else {
+                break;
+            };
+            pending_total = pending_total.saturating_sub(1);
+            self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
+            if self
+                .pending_downstream_reads
+                .get(&session_id)
+                .is_some_and(Vec::is_empty)
+            {
+                self.pending_downstream_reads.remove(&session_id);
+            }
+        }
+        while self.candidates.len() > veriskein_proto::defaults::MAX_ARTIFACTS {
+            let Some(key) = self.candidate_order.pop_front() else {
+                break;
+            };
+            if self.candidates.remove(&key).is_some() {
+                self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
+            }
+        }
+        while self.emitted_chains.len() > veriskein_proto::defaults::MAX_EVENT_INDEX {
+            let Some(chain_id) = self.emitted_chain_order.pop_front() else {
+                break;
+            };
+            if self.emitted_chains.remove(&chain_id) {
+                self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
+            }
+        }
     }
 }
 

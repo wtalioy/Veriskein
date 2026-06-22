@@ -96,6 +96,8 @@ impl PromptEvidenceKind {
 pub struct PromptStore {
     prompts: BTreeMap<PromptId, PromptObject>,
     by_session: BTreeMap<SessionId, VecDeque<PromptId>>,
+    insertion_order: VecDeque<PromptId>,
+    evicted_prompts_total: u64,
 }
 
 impl PromptStore {
@@ -133,8 +135,14 @@ impl PromptStore {
         let id = prompt.id;
         self.prompts.insert(id, prompt);
         self.by_session.entry(session_id).or_default().push_back(id);
+        self.insertion_order.push_back(id);
         self.evict_session(session_id, ts_end);
+        self.evict_global_if_needed();
         id
+    }
+
+    pub fn evicted_prompts_total(&self) -> u64 {
+        self.evicted_prompts_total
     }
 
     pub fn snapshot(&self, id: PromptId) -> Option<PromptSnapshot> {
@@ -282,7 +290,24 @@ impl PromptStore {
         }) {
             if let Some(id) = ids.pop_front() {
                 self.prompts.remove(&id);
+                self.insertion_order.retain(|existing| existing != &id);
+                self.evicted_prompts_total = self.evicted_prompts_total.saturating_add(1);
             }
+        }
+    }
+
+    fn evict_global_if_needed(&mut self) {
+        while self.prompts.len() > defaults::MAX_PROMPTS {
+            let Some(id) = self.insertion_order.pop_front() else {
+                break;
+            };
+            if self.prompts.remove(&id).is_some() {
+                for ids in self.by_session.values_mut() {
+                    ids.retain(|existing| existing != &id);
+                }
+                self.evicted_prompts_total = self.evicted_prompts_total.saturating_add(1);
+            }
+            self.by_session.retain(|_, ids| !ids.is_empty());
         }
     }
 }

@@ -103,7 +103,10 @@ fn attach_prompt_evidence(finding: &mut Finding, prompt_evidence: &[PromptEviden
             _ => PromptEvidenceState::Partial,
         };
         if prompt.visibility_state != VisibilityState::Full {
-            finding.health.visibility_state = prompt.visibility_state;
+            finding.health.visibility_state = finding
+                .health
+                .visibility_state
+                .worst(prompt.visibility_state);
             finding
                 .health
                 .push_degradation_source("prompt_evidence_partial");

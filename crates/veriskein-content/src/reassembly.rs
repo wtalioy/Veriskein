@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use veriskein_proto::VisibilityState;
 
@@ -8,9 +8,13 @@ use crate::{
     http::{BodyFrame, parse_body_frame},
 };
 
+const COMPACT_CONSUMED_THRESHOLD: usize = 4096;
+
 #[derive(Debug, Default)]
 pub struct ContentRuntime {
     streams: BTreeMap<u64, StreamState>,
+    stream_order: VecDeque<u64>,
+    evicted_streams_total: u64,
 }
 
 impl ContentRuntime {
@@ -19,6 +23,7 @@ impl ContentRuntime {
     }
 
     pub fn append(&mut self, fragment: ContentFragment) -> Vec<ExtractedPrompt> {
+        self.enforce_stream_bound(fragment.stream_id);
         let stream = self.streams.entry(fragment.stream_id).or_insert_with(|| {
             StreamState::new(fragment.owner.clone(), fragment.provenance.clone())
         });
@@ -30,9 +35,33 @@ impl ContentRuntime {
         let Some(mut stream) = self.streams.remove(&stream_id) else {
             return Vec::new();
         };
+        self.stream_order.retain(|existing| *existing != stream_id);
         let mut out = stream.extract_ready();
         out.extend(stream.extract_remainder());
         out
+    }
+
+    pub fn evicted_streams_total(&self) -> u64 {
+        self.evicted_streams_total
+    }
+
+    fn enforce_stream_bound(&mut self, incoming_stream_id: u64) {
+        if self.streams.contains_key(&incoming_stream_id) {
+            return;
+        }
+        self.stream_order.push_back(incoming_stream_id);
+        while self.streams.len() >= veriskein_proto::defaults::MAX_STREAMS {
+            let Some(oldest) = self.stream_order.pop_front() else {
+                return;
+            };
+            if oldest == incoming_stream_id {
+                self.stream_order.push_front(oldest);
+                return;
+            }
+            if self.streams.remove(&oldest).is_some() {
+                self.evicted_streams_total = self.evicted_streams_total.saturating_add(1);
+            }
+        }
     }
 }
 
@@ -262,7 +291,7 @@ impl StreamState {
         if self.consumed == 0 {
             return;
         }
-        if self.consumed < 4096 && self.consumed < self.buf.len() {
+        if self.consumed < COMPACT_CONSUMED_THRESHOLD && self.consumed < self.buf.len() {
             return;
         }
         let consumed = self.consumed;

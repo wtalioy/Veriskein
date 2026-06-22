@@ -17,6 +17,12 @@ pub struct Cli {
     pub dry_run: bool,
     #[arg(long = "alert-output", value_name = "PATH")]
     pub alert_output: Option<PathBuf>,
+    #[arg(long = "ringbuf-size", value_name = "BYTES")]
+    pub ringbuf_size: Option<usize>,
+    #[arg(long = "ipc-sock", value_name = "PATH")]
+    pub ipc_sock: Option<PathBuf>,
+    #[arg(long = "no-ipc")]
+    pub no_ipc: bool,
 }
 
 pub fn install_tracing() {

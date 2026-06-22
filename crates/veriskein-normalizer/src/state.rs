@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 mod apply;
@@ -141,8 +141,10 @@ pub struct Normalizer {
     sensitive: SensitiveConfig,
     workspaces: Vec<WorkspaceRef>,
     processes: BTreeMap<u32, ProcessState>,
+    process_order: VecDeque<u32>,
     expiring: BTreeMap<u32, ProcessState>,
     path_cache: BTreeMap<PathCacheKey, PathResolution>,
+    evicted_process_detail_total: u64,
 }
 
 impl Normalizer {
@@ -151,8 +153,10 @@ impl Normalizer {
             sensitive,
             workspaces,
             processes: BTreeMap::new(),
+            process_order: VecDeque::new(),
             expiring: BTreeMap::new(),
             path_cache: BTreeMap::new(),
+            evicted_process_detail_total: 0,
         };
         // Bootstrapping procfs gives the daemon enough state to reason about
         // already-running agent roots before the first live event arrives.
@@ -171,6 +175,30 @@ impl Normalizer {
             .collect()
     }
 
+    pub fn evicted_process_detail_total(&self) -> u64 {
+        self.evicted_process_detail_total
+    }
+
+    pub(crate) fn enforce_process_bounds(&mut self) {
+        while self.processes.len() + self.expiring.len()
+            > veriskein_proto::defaults::MAX_PROCESS_STATES
+        {
+            if let Some(pid) = self.expiring.keys().next().copied() {
+                self.expiring.remove(&pid);
+                self.evicted_process_detail_total =
+                    self.evicted_process_detail_total.saturating_add(1);
+                continue;
+            }
+            let Some(pid) = self.process_order.pop_front() else {
+                break;
+            };
+            if self.processes.remove(&pid).is_some() {
+                self.evicted_process_detail_total =
+                    self.evicted_process_detail_total.saturating_add(1);
+            }
+        }
+    }
+
     fn bootstrap_procfs(&mut self) {
         self.bootstrap_procfs_from(Path::new("/proc"));
     }
@@ -187,7 +215,13 @@ impl Normalizer {
             };
             if let Some(state) = ProcessState::from_proc_root(proc_root, pid) {
                 self.processes.insert(pid, state);
+                self.note_process(pid);
             }
         }
+    }
+
+    pub(crate) fn note_process(&mut self, pid: u32) {
+        self.process_order.retain(|existing| *existing != pid);
+        self.process_order.push_back(pid);
     }
 }

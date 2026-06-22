@@ -8,6 +8,8 @@ use serde_json::Value;
 
 mod replay;
 
+const ASSERT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
 #[derive(Debug, Parser)]
 #[command(name = "veriskein-test")]
 struct Cli {
@@ -73,7 +75,7 @@ fn assert_files(expect: &Path, actual: &Path, timeout: Option<&str>) -> Result<(
                 if Instant::now() >= deadline {
                     return Err(error).context("assertion timed out");
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(ASSERT_RETRY_INTERVAL);
             }
         }
     }

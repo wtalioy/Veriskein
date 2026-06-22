@@ -66,6 +66,16 @@ impl VisibilityState {
             Self::Unavailable => "unavailable",
         }
     }
+
+    pub fn worst(self, other: Self) -> Self {
+        use VisibilityState::{Full, Partial, Unavailable, Unsupported};
+        match (self, other) {
+            (Unavailable, _) | (_, Unavailable) => Unavailable,
+            (Unsupported, _) | (_, Unsupported) => Unsupported,
+            (Partial, _) | (_, Partial) => Partial,
+            (Full, Full) => Full,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,7 +5,10 @@ use veriskein_detectors::{
 };
 use veriskein_proto::defaults;
 
-use crate::{AlertRecord, AlertThrottler, sample_alert_value, validate};
+use crate::{
+    AlertRecord, AlertThrottler, DEGRADATION_SOURCE_RINGBUF_DROP_RATE, RuntimeHealth,
+    sample_alert_value, validate,
+};
 
 fn finding(finding_type: FindingType) -> Finding {
     Finding {
@@ -111,6 +114,86 @@ fn prompt_health_projects_prompt_metadata() {
         "prompt_excerpt_masked"
     );
     assert_eq!(value["capture"]["mode"], "tls");
+    validate(&value).expect("schema valid");
+}
+
+#[test]
+fn runtime_pressure_degrades_alert_policy_once() {
+    let finding = finding(FindingType::CrossAgentPromptInjection);
+    let mut finding = finding;
+    finding.reason_code = "capi_cross_session_prompt_to_syscall";
+    finding.summary = "cross-session prompt injection".to_string();
+    finding.objects = FindingObjects {
+        prompt_ids: vec!["00112233445566778899aabbccddeeff".to_string()],
+        artifact_ids: vec!["11112233445566778899aabbccddeeff".to_string()],
+        event_ids: vec!["evt-risk".to_string()],
+        chain_id: Some("22222233445566778899aabbccddeeff".to_string()),
+        root_session_id: Some("33333333445566778899aabbccddeeff".to_string()),
+        downstream_session_id: Some("00112233445566778899aabbccddeeff".to_string()),
+        ..FindingObjects::default()
+    };
+    finding.evidence = vec![
+        FindingEvidence {
+            kind: "excerpt_match",
+            event_id: "22222233445566778899aabbccddeeff".to_string(),
+            ingest_seq: 0,
+            path: None,
+            ip: None,
+            port: None,
+            score: Some(0.40),
+            src: Some("upstream".to_string()),
+            dst: Some("downstream".to_string()),
+            op: None,
+            note: Some("exact".to_string()),
+        },
+        FindingEvidence {
+            kind: "prompt_ref",
+            event_id: "00112233445566778899aabbccddeeff".to_string(),
+            ingest_seq: 0,
+            path: None,
+            ip: None,
+            port: None,
+            score: None,
+            src: None,
+            dst: None,
+            op: None,
+            note: Some("downstream_prompt".to_string()),
+        },
+        FindingEvidence {
+            kind: "syscall",
+            event_id: "evt-risk".to_string(),
+            ingest_seq: 1,
+            path: None,
+            ip: None,
+            port: None,
+            score: None,
+            src: None,
+            dst: None,
+            op: Some("proc_exec".to_string()),
+            note: Some("risky_action_after_prompt".to_string()),
+        },
+    ];
+    finding.component_scores.insert("causal_score", 0.90);
+    finding.health.prompt_evidence_state = PromptEvidenceState::Available;
+
+    let value = AlertRecord::from_finding_with_health(
+        &finding,
+        &RuntimeHealth::degraded("test_pressure", 0.02),
+    )
+    .as_value()
+    .expect("value");
+
+    assert_eq!(value["severity"], "high");
+    assert_eq!(value["confidence_band"], "medium");
+    assert_eq!(value["fallback"]["mode"], "degraded");
+    assert_eq!(value["fallback"]["visibility"], "partial");
+    assert!(
+        value["fallback"]["degradation_sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .any(|source| source == DEGRADATION_SOURCE_RINGBUF_DROP_RATE)
+    );
     validate(&value).expect("schema valid");
 }
 

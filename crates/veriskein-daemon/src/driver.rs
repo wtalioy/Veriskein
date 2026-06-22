@@ -9,24 +9,51 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 #[cfg(test)]
 use tokio::sync::oneshot::{self, error::TryRecvError};
 use tracing::info;
-use veriskein_alert::stdout_sink;
+use veriskein_alert::{
+    DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF, DEGRADATION_SOURCE_RINGBUF_DROP_RATE,
+    PressureLevel, RuntimeHealth, stdout_sink,
+};
 use veriskein_bpf::{BpfRuntimeConfig, RuntimeEventSource};
 use veriskein_collector::CollectorCounters;
+use veriskein_ipc::default_socket_path;
 
 use crate::Cli;
+use crate::ipc::{IpcServer, IpcSettings};
 use crate::pipeline::RuntimePipeline;
 use crate::preflight::preflight;
+
+const METRICS_EMIT_INTERVAL: Duration = Duration::from_secs(1);
+const HEALTH_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
+const EVENT_LOOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const TEST_DRIVER_DRAIN_DELAY: Duration = Duration::from_millis(350);
 
 pub async fn run(cli: Cli) -> Result<()> {
     preflight(&cli)?;
     let config_root = resolve_config_root()?;
-    let bpf_config = load_bpf_runtime_config(&config_root)?;
-    let source =
-        RuntimeEventSource::start_with_config(bpf_config).context("start BPF event source")?;
+    let bpf_config = load_bpf_runtime_config(&config_root, &cli)?;
+    let source = RuntimeEventSource::start_with_config(bpf_config.clone())
+        .context("start BPF event source")?;
     let sink = open_sink(cli.alert_output.as_deref()).context("open alert sink")?;
     let sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let ipc = if cli.no_ipc {
+        None
+    } else {
+        let config = load_ipc_config(&config_root)?;
+        let path = cli.ipc_sock.clone().unwrap_or_else(default_socket_path);
+        Some(IpcServer::start(path, config).await?)
+    };
 
-    run_with_source_and_sink(source, sink, cli, &config_root, Shutdown::Signal(sigterm)).await
+    run_with_source_and_sink(
+        source,
+        sink,
+        cli,
+        &config_root,
+        initial_runtime_health(&bpf_config),
+        ipc,
+        Shutdown::Signal(sigterm),
+    )
+    .await
 }
 
 pub(crate) fn resolve_config_root() -> Result<std::path::PathBuf> {
@@ -46,6 +73,10 @@ pub(crate) fn resolve_config_root() -> Result<std::path::PathBuf> {
 struct DefaultsConfig {
     #[serde(default)]
     tls: TlsConfig,
+    #[serde(default)]
+    ipc: IpcConfig,
+    #[serde(default)]
+    limits: LimitsConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -62,23 +93,79 @@ struct OpensslConfig {
     soname_allowlist: Vec<String>,
 }
 
-fn load_bpf_runtime_config(config_root: &Path) -> Result<BpfRuntimeConfig> {
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct IpcConfig {
+    #[serde(default)]
+    pub allow_uids: Vec<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LimitsConfig {
+    ringbuf_size: Option<usize>,
+    ipc_alerts_queue: Option<usize>,
+    ipc_events_queue: Option<usize>,
+    ipc_graph_queue: Option<usize>,
+    ipc_client_slow_timeout_ms: Option<u64>,
+}
+
+fn load_bpf_runtime_config(config_root: &Path, cli: &Cli) -> Result<BpfRuntimeConfig> {
+    let mut config = BpfRuntimeConfig::default();
+    if let Some(defaults) = load_defaults_config(config_root)? {
+        config.openssl_library_paths = defaults.tls.openssl.library_paths;
+        config.openssl_soname_allowlist = defaults.tls.openssl.soname_allowlist;
+        if let Some(ringbuf_size) = defaults.limits.ringbuf_size {
+            config.ringbuf_size = ringbuf_size;
+        }
+    }
+    if config.openssl_soname_allowlist.is_empty() {
+        config.openssl_soname_allowlist = BpfRuntimeConfig::default().openssl_soname_allowlist;
+    }
+    if let Some(ringbuf_size) = cli.ringbuf_size {
+        config.ringbuf_size = ringbuf_size;
+    }
+    Ok(config)
+}
+
+fn load_ipc_config(config_root: &Path) -> Result<IpcSettings> {
+    let Some(defaults) = load_defaults_config(config_root)? else {
+        return Ok(IpcSettings::default());
+    };
+    Ok(ipc_settings_from_defaults(defaults))
+}
+
+fn load_defaults_config(config_root: &Path) -> Result<Option<DefaultsConfig>> {
     let path = config_root.join("config/defaults.toml");
     if !path.exists() {
-        return Ok(BpfRuntimeConfig::default());
+        return Ok(None);
     }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("read defaults config {}", path.display()))?;
     let defaults: DefaultsConfig = toml::from_str(&text)
         .with_context(|| format!("parse defaults config {}", path.display()))?;
-    let mut config = BpfRuntimeConfig {
-        openssl_library_paths: defaults.tls.openssl.library_paths,
-        openssl_soname_allowlist: defaults.tls.openssl.soname_allowlist,
-    };
-    if config.openssl_soname_allowlist.is_empty() {
-        config.openssl_soname_allowlist = BpfRuntimeConfig::default().openssl_soname_allowlist;
+    Ok(Some(defaults))
+}
+
+fn ipc_settings_from_defaults(defaults: DefaultsConfig) -> IpcSettings {
+    let default_settings = IpcSettings::default();
+    IpcSettings {
+        allow_uids: defaults.ipc.allow_uids,
+        alerts_capacity: defaults
+            .limits
+            .ipc_alerts_queue
+            .unwrap_or(default_settings.alerts_capacity),
+        events_capacity: defaults
+            .limits
+            .ipc_events_queue
+            .unwrap_or(default_settings.events_capacity),
+        graph_capacity: defaults
+            .limits
+            .ipc_graph_queue
+            .unwrap_or(default_settings.graph_capacity),
+        client_slow_timeout_ms: defaults
+            .limits
+            .ipc_client_slow_timeout_ms
+            .unwrap_or(default_settings.client_slow_timeout_ms),
     }
-    Ok(config)
 }
 
 fn open_sink(path: Option<&Path>) -> Result<Box<dyn Write + Send>> {
@@ -92,20 +179,72 @@ fn open_sink(path: Option<&Path>) -> Result<Box<dyn Write + Send>> {
     }
 }
 
-struct MetricsTick {
-    last_at: Instant,
+#[derive(Debug, Clone)]
+struct CounterWindow {
     last_raw_events: u64,
     last_drops: u64,
+    last_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CounterDelta {
+    elapsed_secs: f64,
+    raw_events: u64,
+    drops: u64,
+}
+
+impl CounterWindow {
+    fn new() -> Self {
+        Self {
+            last_raw_events: 0,
+            last_drops: 0,
+            last_at: Instant::now(),
+        }
+    }
+
+    fn snapshot_if_due(
+        &mut self,
+        counters: &CollectorCounters,
+        interval: Duration,
+    ) -> Option<CounterDelta> {
+        let elapsed = self.last_at.elapsed();
+        if elapsed < interval {
+            return None;
+        }
+        let delta = CounterDelta {
+            elapsed_secs: elapsed.as_secs_f64(),
+            raw_events: counters
+                .raw_events_total
+                .saturating_sub(self.last_raw_events),
+            drops: counters
+                .reorder_or_drop_total
+                .saturating_sub(self.last_drops),
+        };
+        self.last_at = Instant::now();
+        self.last_raw_events = counters.raw_events_total;
+        self.last_drops = counters.reorder_or_drop_total;
+        Some(delta)
+    }
+}
+
+struct MetricsTick {
+    counters: CounterWindow,
     last_detector_fires: u64,
+    detector_fires_total: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MetricsSample {
+    events_per_s: f64,
+    drops_per_s: f64,
+    detector_fires_per_s: f64,
     detector_fires_total: u64,
 }
 
 impl MetricsTick {
     fn new() -> Self {
         Self {
-            last_at: Instant::now(),
-            last_raw_events: 0,
-            last_drops: 0,
+            counters: CounterWindow::new(),
             last_detector_fires: 0,
             detector_fires_total: 0,
         }
@@ -115,31 +254,83 @@ impl MetricsTick {
         self.detector_fires_total += count as u64;
     }
 
-    fn maybe_log(&mut self, counters: &CollectorCounters) {
-        let elapsed = self.last_at.elapsed();
-        if elapsed < Duration::from_secs(1) {
-            return;
-        }
-        let secs = elapsed.as_secs_f64();
-        let raw_delta = counters
-            .raw_events_total
-            .saturating_sub(self.last_raw_events);
-        let drop_delta = counters
-            .reorder_or_drop_total
-            .saturating_sub(self.last_drops);
+    fn maybe_log(&mut self, counters: &CollectorCounters) -> Option<MetricsSample> {
+        let delta = self
+            .counters
+            .snapshot_if_due(counters, METRICS_EMIT_INTERVAL)?;
         let fire_delta = self
             .detector_fires_total
             .saturating_sub(self.last_detector_fires);
+        let sample = MetricsSample {
+            events_per_s: delta.raw_events as f64 / delta.elapsed_secs,
+            drops_per_s: delta.drops as f64 / delta.elapsed_secs,
+            detector_fires_per_s: fire_delta as f64 / delta.elapsed_secs,
+            detector_fires_total: self.detector_fires_total,
+        };
         info!(
-            events_per_s = raw_delta as f64 / secs,
-            drops_per_s = drop_delta as f64 / secs,
-            detector_fires_per_s = fire_delta as f64 / secs,
+            events_per_s = sample.events_per_s,
+            drops_per_s = sample.drops_per_s,
+            detector_fires_per_s = sample.detector_fires_per_s,
             "veriskein metrics"
         );
-        self.last_at = Instant::now();
-        self.last_raw_events = counters.raw_events_total;
-        self.last_drops = counters.reorder_or_drop_total;
         self.last_detector_fires = self.detector_fires_total;
+        Some(sample)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeHealthTracker {
+    health: RuntimeHealth,
+    counters: CounterWindow,
+}
+
+impl RuntimeHealthTracker {
+    fn new(initial: RuntimeHealth) -> Self {
+        Self {
+            health: initial,
+            counters: CounterWindow::new(),
+        }
+    }
+
+    fn current(&self) -> &RuntimeHealth {
+        &self.health
+    }
+
+    fn maybe_update(&mut self, counters: &CollectorCounters) {
+        let Some(delta) = self
+            .counters
+            .snapshot_if_due(counters, HEALTH_UPDATE_INTERVAL)
+        else {
+            return;
+        };
+        let drop_rate = if delta.raw_events == 0 {
+            0.0
+        } else {
+            delta.drops as f32 / delta.raw_events as f32
+        };
+        if drop_rate >= veriskein_proto::defaults::DROP_RATE_DEGRADE_THRESHOLD {
+            self.health = RuntimeHealth {
+                pressure: PressureLevel::Degraded,
+                drop_rate,
+                degradation_sources: vec![DEGRADATION_SOURCE_RINGBUF_DROP_RATE.to_string()],
+            };
+        } else if self.health.degradation_sources == [DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF] {
+            self.health.drop_rate = drop_rate;
+        } else {
+            self.health = RuntimeHealth::full();
+        }
+    }
+}
+
+fn initial_runtime_health(config: &BpfRuntimeConfig) -> RuntimeHealth {
+    if config.ringbuf_size < veriskein_proto::defaults::RINGBUF_SIZE_TOTAL {
+        RuntimeHealth {
+            pressure: PressureLevel::Degraded,
+            drop_rate: 0.0,
+            degradation_sources: vec![DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF.to_string()],
+        }
+    } else {
+        RuntimeHealth::full()
     }
 }
 
@@ -192,12 +383,15 @@ async fn run_with_source_and_sink<S>(
     mut sink: Box<dyn Write + Send>,
     cli: Cli,
     config_root: &Path,
+    initial_health: RuntimeHealth,
+    ipc: Option<IpcServer>,
     mut shutdown: Shutdown,
 ) -> Result<()>
 where
     S: EventSource + Send + 'static,
 {
     let mut pipeline = RuntimePipeline::new(config_root, &cli.workspaces)?;
+    let mut health = RuntimeHealthTracker::new(initial_health);
     let mut metrics = MetricsTick::new();
 
     info!("veriskein runtime started");
@@ -206,7 +400,7 @@ where
         tokio::select! {
             biased;
             _ = shutdown.recv() => break,
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+            _ = tokio::time::sleep(EVENT_LOOP_POLL_INTERVAL) => {
                 if shutdown.requested() {
                     break;
                 }
@@ -216,20 +410,40 @@ where
                 loop {
                     match source.try_recv() {
                         Ok(Some(raw)) => {
-                            let emitted =
+                            pipeline.set_runtime_health(health.current().clone());
+                            let alerts =
                                 pipeline.process_raw_event_bytes(&raw, &mut *sink, cli.dry_run)?;
-                            metrics.add_detector_fires(emitted);
+                            metrics.add_detector_fires(alerts.len());
+                            if let Some(ipc) = &ipc {
+                                for alert in alerts {
+                                    ipc.publish_alert(alert.as_value()?);
+                                }
+                            }
                         }
                         Ok(None) => break,
                         Err(err) => return Err(err),
                     }
                 }
-                metrics.maybe_log(pipeline.collector_counters());
+                if let Some(sample) = metrics.maybe_log(pipeline.collector_counters())
+                    && let Some(ipc) = &ipc
+                {
+                    ipc.publish_metrics(
+                        pipeline.collector_counters(),
+                        sample.detector_fires_total,
+                        sample.events_per_s,
+                        sample.drops_per_s,
+                        sample.detector_fires_per_s,
+                    );
+                }
+                health.maybe_update(pipeline.collector_counters());
                 pipeline.maybe_refresh_endpoint_ips();
             }
         }
     }
     source.shutdown().context("stop event source")?;
+    if let Some(ipc) = ipc {
+        ipc.shutdown().await;
+    }
     sink.flush().context("flush alert sink")?;
     Ok(())
 }
@@ -247,7 +461,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     use serde_json::Value;
     use tempfile::NamedTempFile;
@@ -307,13 +520,18 @@ mod tests {
                     workspaces: vec!["/tmp/ws".into()],
                     dry_run,
                     alert_output: None,
+                    ringbuf_size: None,
+                    ipc_sock: None,
+                    no_ipc: true,
                 },
                 &config_root(),
+                veriskein_alert::RuntimeHealth::full(),
+                None,
                 Shutdown::Oneshot(shutdown_rx),
             )
             .await
         });
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        tokio::time::sleep(super::TEST_DRIVER_DRAIN_DELAY).await;
         let _ = shutdown_tx.send(());
         handle.await.expect("join").expect("driver ok");
 

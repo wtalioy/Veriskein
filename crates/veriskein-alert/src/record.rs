@@ -9,6 +9,49 @@ use veriskein_detectors::{
 };
 use veriskein_proto::defaults;
 
+pub const DEGRADATION_SOURCE_RINGBUF_DROP_RATE: &str = "ringbuf_drop_rate";
+pub const DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF: &str = "configured_small_ringbuf";
+pub(crate) const ALERT_DETECTOR_VERSION: u32 = 1;
+pub(crate) const ALERT_POLICY_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PressureLevel {
+    Nominal,
+    Degraded,
+    Critical,
+}
+
+impl PressureLevel {
+    pub fn is_degraded(self) -> bool {
+        !matches!(self, Self::Nominal)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RuntimeHealth {
+    pub pressure: PressureLevel,
+    pub drop_rate: f32,
+    pub degradation_sources: Vec<String>,
+}
+
+impl RuntimeHealth {
+    pub fn full() -> Self {
+        Self {
+            pressure: PressureLevel::Nominal,
+            drop_rate: 0.0,
+            degradation_sources: Vec::new(),
+        }
+    }
+
+    pub fn degraded(source: impl Into<String>, drop_rate: f32) -> Self {
+        Self {
+            pressure: PressureLevel::Degraded,
+            drop_rate,
+            degradation_sources: vec![source.into()],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AlertEvidence {
     pub kind: String,
@@ -86,8 +129,13 @@ pub struct AlertRecord {
 
 impl AlertRecord {
     pub fn from_finding(finding: &Finding) -> Self {
-        let (severity, confidence_band, confidence_score) = policy_for(finding);
-        let visibility = finding.health.visibility_state.as_str();
+        Self::from_finding_with_health(finding, &RuntimeHealth::full())
+    }
+
+    pub fn from_finding_with_health(finding: &Finding, runtime: &RuntimeHealth) -> Self {
+        let (severity, confidence_band, confidence_score) = policy_for(finding, runtime);
+        let visibility_state = combined_visibility(finding.health.visibility_state, runtime);
+        let visibility = visibility_state.as_str();
         let alert_type = finding.finding_type.as_str().to_string();
         // Alert ids intentionally derive from the primary object instead of
         // the raw event id so duplicate detector outputs can collapse without
@@ -104,7 +152,7 @@ impl AlertRecord {
         )
         .hex();
         Self {
-            schema_version: defaults::EVT_ABI_VERSION,
+            schema_version: defaults::ALERT_SCHEMA_VERSION,
             alert_id,
             ts_ns: finding.ts_ns,
             alert_type,
@@ -120,14 +168,14 @@ impl AlertRecord {
             objects: AlertObjects::from(&finding.objects),
             evidence: finding.evidence.iter().map(AlertEvidence::from).collect(),
             fallback: AlertFallback {
-                mode: fallback_mode(finding.health.visibility_state),
+                mode: fallback_mode(visibility_state),
                 visibility,
                 prompt_evidence: finding.health.prompt_evidence_state.as_str(),
-                degradation_sources: finding.health.degradation_sources.clone(),
+                degradation_sources: combined_degradation_sources(finding, runtime),
             },
             policy: AlertPolicy {
-                detector_version: 1,
-                policy_version: 1,
+                detector_version: ALERT_DETECTOR_VERSION,
+                policy_version: ALERT_POLICY_VERSION,
                 component_scores: finding
                     .component_scores
                     .iter()
@@ -199,7 +247,7 @@ impl From<&FindingEvidence> for AlertEvidence {
     }
 }
 
-fn policy_for(finding: &Finding) -> (&'static str, &'static str, f32) {
+fn policy_for(finding: &Finding, runtime: &RuntimeHealth) -> (&'static str, &'static str, f32) {
     // The current detector set uses fixed policy metadata so schema consumers
     // can rely on stable severity bands before richer scoring lands.
     let policy = match finding.finding_type {
@@ -222,13 +270,18 @@ fn policy_for(finding: &Finding) -> (&'static str, &'static str, f32) {
         }
         FindingType::ExecObserved => ("low", "strong", 1.0),
     };
-    if finding.health.visibility_state == VisibilityState::Full {
+    if finding.health.visibility_state == VisibilityState::Full && !runtime.pressure.is_degraded() {
         policy
     } else {
+        let score_cap = if runtime.pressure == PressureLevel::Critical {
+            0.55
+        } else {
+            0.70
+        };
         (
             downgrade_severity(policy.0),
             cap_band(policy.1),
-            policy.2.min(0.70),
+            policy.2.min(score_cap),
         )
     }
 }
@@ -257,6 +310,32 @@ fn redaction_mode(finding: &Finding) -> &'static str {
     }
 }
 
+fn combined_visibility(visibility: VisibilityState, runtime: &RuntimeHealth) -> VisibilityState {
+    let runtime_visibility = if runtime.pressure.is_degraded() {
+        VisibilityState::Partial
+    } else {
+        VisibilityState::Full
+    };
+    visibility.worst(runtime_visibility)
+}
+
+fn combined_degradation_sources(finding: &Finding, runtime: &RuntimeHealth) -> Vec<String> {
+    let mut out = finding.health.degradation_sources.clone();
+    for source in &runtime.degradation_sources {
+        if !out.iter().any(|existing| existing == source) {
+            out.push(source.clone());
+        }
+    }
+    if runtime.drop_rate >= defaults::DROP_RATE_DEGRADE_THRESHOLD
+        && !out
+            .iter()
+            .any(|source| source == DEGRADATION_SOURCE_RINGBUF_DROP_RATE)
+    {
+        out.push(DEGRADATION_SOURCE_RINGBUF_DROP_RATE.to_string());
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 struct ThrottleEntry {
     first_alert: AlertRecord,
@@ -270,11 +349,19 @@ pub struct AlertThrottler {
 
 impl AlertThrottler {
     pub fn project(&mut self, finding: &Finding) -> Option<AlertRecord> {
+        self.project_with_health(finding, &RuntimeHealth::full())
+    }
+
+    pub fn project_with_health(
+        &mut self,
+        finding: &Finding,
+        runtime: &RuntimeHealth,
+    ) -> Option<AlertRecord> {
         if !valid_finding(finding) {
             debug_assert!(false, "malformed finding rejected before alert projection");
             return None;
         }
-        let mut alert = AlertRecord::from_finding(finding);
+        let mut alert = AlertRecord::from_finding_with_health(finding, runtime);
         let key = throttle_key(&alert);
         let window_ns = defaults::secs_to_ns(defaults::ALERT_DEDUP_SECS);
         self.entries.retain(|entry_key, entry| {
@@ -357,11 +444,10 @@ fn valid_finding(finding: &Finding) -> bool {
 
 fn throttle_key(alert: &AlertRecord) -> String {
     format!(
-        "{}:{}:{}:{}:{}",
+        "{}:{}:{}:{}",
         alert.session_id,
         alert.alert_type,
         alert.reason_code,
-        alert.fallback.mode,
         alert
             .objects
             .chain_id

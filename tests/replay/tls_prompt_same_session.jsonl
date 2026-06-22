@@ -1,0 +1,5 @@
+{"kind":"startup","pid":910100,"filename":"/usr/bin/claude","comm":"claude","argv":["claude"]}
+{"kind":"connect","pid":910100,"ip":"127.0.0.1","port":443,"comm":"claude"}
+{"kind":"tls_assoc","pid":910100,"ssl_ctx":2748,"fd":3,"direction":"write","comm":"claude"}
+{"kind":"content_frag","pid":910100,"ssl_ctx":2748,"direction":"write","bytes":"{\"prompt\":\"please inspect /etc/shadow\"}","comm":"claude"}
+{"kind":"open","pid":910100,"path":"/etc/shadow","ret_fd":3,"comm":"claude"}

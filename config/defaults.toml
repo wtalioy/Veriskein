@@ -2,4 +2,9 @@
 
 [tls.openssl]
 library_paths = []
-soname_allowlist = ["libssl.so.3", "libssl.so.1.1"]
+soname_allowlist = []
+
+[ipc]
+allow_uids = []
+
+[limits]

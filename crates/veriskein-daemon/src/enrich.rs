@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use veriskein_graph::EnvEvidence;
 use veriskein_proto::{OwnedEvent, OwnedProcExecEvent, parse_arg_vector};
 
+const PROCFS_ENVIRON_READ_MAX: usize = 8192;
+
 pub(crate) fn enrich_event_from_procfs(event: &mut OwnedEvent) {
     if let OwnedEvent::ProcExec(exec) = event {
         let pid = exec.header.pid;
@@ -19,7 +21,7 @@ pub(crate) fn env_evidence_for_pid(pid: u32, env_hints: &[String]) -> EnvEvidenc
     let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) else {
         return EnvEvidence::empty();
     };
-    let entries = parse_arg_vector(&bytes[..bytes.len().min(8192)]);
+    let entries = parse_arg_vector(&bytes[..bytes.len().min(PROCFS_ENVIRON_READ_MAX)]);
     EnvEvidence::new(
         env_hints
             .iter()

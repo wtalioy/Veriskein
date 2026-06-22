@@ -318,20 +318,12 @@ fn apply_connect_ip(event: &mut OwnedEvent, ip: &str) -> Result<()> {
     let OwnedEvent::NetConnect(connect) = event else {
         bail!("connect replay event did not build a net_connect event");
     };
-    match ip
+    let ip = ip
         .parse::<IpAddr>()
-        .with_context(|| format!("parse connect ip {ip:?}"))?
-    {
-        IpAddr::V4(ip) => {
-            connect.family = 2;
-            connect.addr_dst = [0; 16];
-            connect.addr_dst[12..16].copy_from_slice(&ip.octets());
-        }
-        IpAddr::V6(ip) => {
-            connect.family = 10;
-            connect.addr_dst = ip.octets();
-        }
-    }
+        .with_context(|| format!("parse connect ip {ip:?}"))?;
+    let (family, addr) = veriskein_proto::raw_net_addr(ip);
+    connect.family = family;
+    connect.addr_dst = addr;
     Ok(())
 }
 

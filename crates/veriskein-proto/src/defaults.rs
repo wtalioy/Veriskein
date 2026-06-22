@@ -1,4 +1,6 @@
 pub const EVT_ABI_VERSION: u32 = 2;
+pub const ALERT_SCHEMA_VERSION: u32 = 1;
+pub const IPC_SCHEMA_VERSION: u32 = 1;
 pub const NS_PER_MS: u64 = 1_000_000;
 pub const NS_PER_SEC: u64 = 1_000_000_000;
 
@@ -18,6 +20,7 @@ pub const CONTENT_INLINE_MAX: usize = 3072;
 pub const TEXT_EXCERPT_MAX: usize = 4096;
 pub const TEXT_EXCERPT_TAIL: usize = 512;
 pub const RINGBUF_SIZE_TOTAL: usize = 16 * 1024 * 1024;
+pub const RINGBUF_POLL_INTERVAL_MS: u64 = 1;
 pub const SYMLINK_MAX_DEPTH: u8 = 16;
 pub const EXPIRING_PROC_HOLD_MS: u64 = 30_000;
 pub const PROMPT_WINDOW_MS: u64 = 60_000;

@@ -134,7 +134,7 @@ pub fn gated_match_candidate(
         propagation_fact,
         match_tier,
         match_score: score,
-        visibility_state: combine_visibility(artifact.visibility_state, prompt.visibility_state),
+        visibility_state: artifact.visibility_state.worst(prompt.visibility_state),
     })
 }
 
@@ -243,16 +243,6 @@ fn locator_path(locator: &SourceLocator) -> &str {
 
 fn trim_excerpt(text: &str) -> String {
     text.chars().take(160).collect()
-}
-
-fn combine_visibility(left: VisibilityState, right: VisibilityState) -> VisibilityState {
-    use VisibilityState::{Full, Partial, Unavailable, Unsupported};
-    match (left, right) {
-        (Unavailable, _) | (_, Unavailable) => Unavailable,
-        (Unsupported, _) | (_, Unsupported) => Unsupported,
-        (Partial, _) | (_, Partial) => Partial,
-        (Full, Full) => Full,
-    }
 }
 
 #[cfg(test)]

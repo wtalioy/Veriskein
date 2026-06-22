@@ -7,6 +7,8 @@ mod tests;
 
 pub use record::{
     AlertCapture, AlertEvidence, AlertFallback, AlertObjects, AlertPolicy, AlertRecord,
-    AlertThrottler, emit_ndjson_line, stdout_sink,
+    AlertThrottler, DEGRADATION_SOURCE_CONFIGURED_SMALL_RINGBUF,
+    DEGRADATION_SOURCE_RINGBUF_DROP_RATE, PressureLevel, RuntimeHealth, emit_ndjson_line,
+    stdout_sink,
 };
 pub use schema::{sample_alert_value, validate, validator};

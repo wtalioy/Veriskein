@@ -1,5 +1,7 @@
 use veriskein_proto::defaults;
 
+const NORMALIZED_TEXT_MAX: usize = 8192;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentSignature {
     pub hash_exact: [u8; 16],
@@ -32,7 +34,7 @@ pub fn normalize_text(bytes: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
-        .take(8192)
+        .take(NORMALIZED_TEXT_MAX)
         .collect()
 }
 

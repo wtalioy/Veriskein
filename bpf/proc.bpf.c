@@ -8,7 +8,6 @@
 #define EVT_PROC_EXIT 3
 #define EVT_PROC_CHDIR 4
 #define EVT_FD_DUP 5
-#define PATH_INLINE_MAX 256
 
 struct proc_fork_event {
     struct event_header header;
@@ -86,21 +85,21 @@ VERISKEIN_EVENT_MAPS
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct chdir_args_state);
 } chdir_args SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct fchdir_args_state);
 } fchdir_args SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct dup_args_state);
 } dup_args SEC(".maps");

@@ -21,6 +21,7 @@ const TLS_BPF_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tls_upro
 pub struct BpfRuntimeConfig {
     pub openssl_library_paths: Vec<PathBuf>,
     pub openssl_soname_allowlist: Vec<String>,
+    pub ringbuf_size: usize,
 }
 
 impl Default for BpfRuntimeConfig {
@@ -28,6 +29,7 @@ impl Default for BpfRuntimeConfig {
         Self {
             openssl_library_paths: Vec::new(),
             openssl_soname_allowlist: vec!["libssl.so.3".to_string(), "libssl.so.1.1".to_string()],
+            ringbuf_size: veriskein_proto::defaults::RINGBUF_SIZE_TOTAL,
         }
     }
 }
@@ -57,7 +59,7 @@ impl RuntimeEventSource {
         let worker = thread::Builder::new()
             .name("veriskein-bpf".to_string())
             .spawn(move || {
-                let mut objects = load_objects()?;
+                let mut objects = load_objects(config.ringbuf_size)?;
                 let mut links = Vec::<Link>::new();
                 let tls_index = objects
                     .iter()
@@ -113,7 +115,9 @@ impl RuntimeEventSource {
                 let ringbuf = builder.build().context("build ringbuf")?;
 
                 while !worker_shutdown.load(Ordering::Relaxed) {
-                    match ringbuf.poll(Duration::from_millis(200)) {
+                    match ringbuf.poll(Duration::from_millis(
+                        veriskein_proto::defaults::RINGBUF_POLL_INTERVAL_MS,
+                    )) {
                         Ok(()) => {}
                         Err(err) if err.kind() == BpfErrorKind::Interrupted => continue,
                         Err(err) => return Err(err).context("poll ringbuf"),
@@ -177,7 +181,7 @@ impl Drop for RuntimeEventSource {
     }
 }
 
-fn load_objects() -> Result<Vec<LoadedObject>> {
+fn load_objects(ringbuf_size: usize) -> Result<Vec<LoadedObject>> {
     // Runtime loading order matches the logical ownership split in `bpf/` and
     // keeps object-specific errors easy to attribute.
     [
@@ -188,9 +192,19 @@ fn load_objects() -> Result<Vec<LoadedObject>> {
     ]
     .into_iter()
     .map(|(name, bytes)| {
-        let object = ObjectBuilder::default()
+        let mut object = ObjectBuilder::default()
             .open_memory(bytes)
-            .with_context(|| format!("open {name} BPF object"))?
+            .with_context(|| format!("open {name} BPF object"))?;
+        if let Some(mut events) = object
+            .maps_mut()
+            .find(|map| map.name().to_string_lossy() == "events")
+        {
+            let entries = u32::try_from(ringbuf_size).context("ringbuf size exceeds u32")?;
+            events
+                .set_max_entries(entries)
+                .with_context(|| format!("resize {name} ringbuf"))?;
+        }
+        let object = object
             .load()
             .with_context(|| format!("load {name} BPF object"))?;
         Ok(LoadedObject { name, object })

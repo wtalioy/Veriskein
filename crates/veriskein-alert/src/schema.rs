@@ -3,6 +3,9 @@ use std::sync::OnceLock;
 use anyhow::{Result, bail};
 use jsonschema::{Draft, Validator, options};
 use serde_json::{Value, json};
+use veriskein_proto::defaults;
+
+use crate::record::{ALERT_DETECTOR_VERSION, ALERT_POLICY_VERSION};
 
 static VALIDATOR: OnceLock<Validator> = OnceLock::new();
 const SCHEMA_SRC: &str = include_str!("../../../proto/alert.schema.json");
@@ -28,7 +31,7 @@ pub fn validate(value: &Value) -> Result<()> {
 
 pub fn sample_alert_value() -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": defaults::ALERT_SCHEMA_VERSION,
         "alert_id": "abc123abc123abc123abc123abc123ab",
         "ts_ns": 1,
         "type": "unexpected_shell",
@@ -74,8 +77,8 @@ pub fn sample_alert_value() -> Value {
             "degradation_sources": []
         },
         "policy": {
-            "detector_version": 1,
-            "policy_version": 1,
+            "detector_version": ALERT_DETECTOR_VERSION,
+            "policy_version": ALERT_POLICY_VERSION,
             "component_scores": {}
         },
         "capture": {

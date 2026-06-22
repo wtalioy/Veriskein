@@ -5,7 +5,6 @@
 
 #define EVT_CONTENT_FRAG 30
 #define EVT_TLS_ASSOC 31
-#define CONTENT_INLINE_MAX 3072
 #define CONTENT_CHANNEL_TLS 1
 #define CONTENT_DIRECTION_READ 1
 #define CONTENT_DIRECTION_WRITE 2
@@ -89,21 +88,21 @@ VERISKEIN_EVENT_MAPS
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct ssl_read_args);
 } ssl_read_args_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct ssl_assoc_args);
 } ssl_assoc_args_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 16384);
+    __uint(max_entries, STREAM_OFFSETS_MAX_ENTRIES);
     __type(key, struct stream_key);
     __type(value, __u64);
 } stream_offsets SEC(".maps");

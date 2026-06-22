@@ -25,6 +25,7 @@ veriskein-content = { path = "../veriskein-content" }
 veriskein-correlator = { path = "../veriskein-correlator" }
 veriskein-detectors = { path = "../veriskein-detectors" }
 veriskein-graph = { path = "../veriskein-graph" }
+veriskein-ipc = { path = "../veriskein-ipc" }
 veriskein-normalizer = { path = "../veriskein-normalizer" }
 veriskein-proto = { path = "../veriskein-proto" }
 veriskein-state-net = { path = "../veriskein-state-net" }

@@ -6,7 +6,6 @@
 #define EVT_FILE_OPEN 10
 #define EVT_FILE_UNLINK 11
 #define EVT_FILE_RENAME 12
-#define PATH_INLINE_MAX 256
 
 struct file_open_event {
     struct event_header header;
@@ -71,21 +70,21 @@ VERISKEIN_EVENT_MAPS
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct open_args_state);
 } open_args SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct unlink_args_state);
 } unlink_args SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct rename_args_state);
 } rename_args SEC(".maps");

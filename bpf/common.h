@@ -9,6 +9,11 @@
 
 #define EVT_ABI_VERSION 2
 #define TASK_COMM_LEN 16
+#define PATH_INLINE_MAX 256
+#define CONTENT_INLINE_MAX 3072
+#define VERISKEIN_RINGBUF_MAX_ENTRIES (16 * 1024 * 1024)
+#define PENDING_ARGS_MAX_ENTRIES 8192
+#define STREAM_OFFSETS_MAX_ENTRIES 16384
 
 struct event_header {
     __u64 ts_ns;
@@ -50,7 +55,7 @@ struct sys_exit_args {
 #define VERISKEIN_EVENT_MAPS                                                   \
     struct {                                                                   \
         __uint(type, BPF_MAP_TYPE_RINGBUF);                                    \
-        __uint(max_entries, 16 * 1024 * 1024);                                 \
+        __uint(max_entries, VERISKEIN_RINGBUF_MAX_ENTRIES);                    \
     } events SEC(".maps");                                                    \
                                                                                \
     struct {                                                                   \

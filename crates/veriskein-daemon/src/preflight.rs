@@ -7,6 +7,8 @@ use veriskein_graph::AgentConfig;
 use crate::Cli;
 use crate::driver::resolve_config_root;
 
+const MEMLOCK_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PreflightError {
     #[error("kernel {0} is below the supported minimum of 5.15")]
@@ -98,7 +100,6 @@ fn read_kernel_release() -> Result<String, PreflightError> {
 }
 
 fn ensure_memlock_limit() -> Result<()> {
-    let target = 64_u64 * 1024 * 1024;
     let mut current = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -108,13 +109,13 @@ fn ensure_memlock_limit() -> Result<()> {
         bail!("getrlimit failed");
     }
 
-    if current.rlim_cur >= target {
+    if current.rlim_cur >= MEMLOCK_TARGET_BYTES {
         return Ok(());
     }
 
     let desired = libc::rlimit {
-        rlim_cur: target,
-        rlim_max: current.rlim_max.max(target),
+        rlim_cur: MEMLOCK_TARGET_BYTES,
+        rlim_max: current.rlim_max.max(MEMLOCK_TARGET_BYTES),
     };
     let rc = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &desired) };
     if rc != 0 {

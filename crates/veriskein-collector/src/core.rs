@@ -25,7 +25,7 @@ pub struct CollectorCore {
     // Kernel ordering is only meaningful within a CPU stream here, so we track
     // the last seen seq independently per CPU and synthesize loss/reorder facts
     // before assigning the daemon-wide ingest sequence.
-    per_cpu_last_seq: BTreeMap<u32, u64>,
+    per_cpu_last_seq: BTreeMap<SeqStreamKey, u64>,
     next_ingest_seq: u64,
     counters: CollectorCounters,
 }
@@ -48,9 +48,12 @@ impl CollectorCore {
     pub fn process_parsed(&mut self, parsed: EventRef<'_>) -> Vec<CollectedEvent> {
         let mut out = Vec::new();
         let header = parsed.header();
-        let cpu = header.cpu;
+        let key = SeqStreamKey {
+            cpu: header.cpu,
+            source: seq_source(header.kind),
+        };
         let seq = header.seq;
-        let last_seq = self.per_cpu_last_seq.get(&cpu).copied();
+        let last_seq = self.per_cpu_last_seq.get(&key).copied();
 
         if let Some(last_seq) = last_seq {
             if seq > last_seq + 1 {
@@ -60,7 +63,7 @@ impl CollectorCore {
                 self.counters.reorder_or_drop_total += 1;
                 let missing = seq - (last_seq + 1);
                 let drop_event =
-                    meta_drop_event(cpu, seq, last_seq + 1, seq, missing, DropReason::SeqGap);
+                    meta_drop_event(key.cpu, seq, last_seq + 1, seq, missing, DropReason::SeqGap);
                 out.push(self.wrap(drop_event));
             } else if seq <= last_seq {
                 // Replayed or stale events are surfaced the same way: preserve
@@ -68,12 +71,12 @@ impl CollectorCore {
                 // stream was strictly monotonic.
                 self.counters.reorder_or_drop_total += 1;
                 let drop_event =
-                    meta_drop_event(cpu, seq, last_seq + 1, seq, 0, DropReason::Reordered);
+                    meta_drop_event(key.cpu, seq, last_seq + 1, seq, 0, DropReason::Reordered);
                 out.push(self.wrap(drop_event));
             }
         }
 
-        self.per_cpu_last_seq.insert(cpu, seq);
+        self.per_cpu_last_seq.insert(key, seq);
         out.push(self.wrap(parsed.to_owned()));
         self.counters.emitted_events_total += out.len() as u64;
         out
@@ -85,6 +88,38 @@ impl CollectorCore {
             ingest_seq: self.next_ingest_seq,
             event,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SeqStreamKey {
+    cpu: u32,
+    source: SeqSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SeqSource {
+    Proc,
+    Fs,
+    Net,
+    Tls,
+    Meta,
+}
+
+fn seq_source(kind: u16) -> SeqSource {
+    match kind {
+        kind if kind == EventKind::FileOpen as u16
+            || kind == EventKind::FileUnlink as u16
+            || kind == EventKind::FileRename as u16 =>
+        {
+            SeqSource::Fs
+        }
+        kind if kind == EventKind::NetConnect as u16 => SeqSource::Net,
+        kind if kind == EventKind::ContentFrag as u16 || kind == EventKind::TlsAssoc as u16 => {
+            SeqSource::Tls
+        }
+        kind if kind == EventKind::MetaDrop as u16 => SeqSource::Meta,
+        _ => SeqSource::Proc,
     }
 }
 

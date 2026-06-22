@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use veriskein_alert::{AlertThrottler, emit_ndjson_line, validate};
+use veriskein_alert::{AlertRecord, AlertThrottler, RuntimeHealth, emit_ndjson_line, validate};
 use veriskein_collector::CollectorCore;
 use veriskein_content::{
     ContentFragment, ContentRuntime, ExtractedPrompt, StreamOwner, StreamProvenance, TlsStreamKey,
@@ -36,6 +36,7 @@ pub struct RuntimePipeline {
     pending_prompts: BTreeMap<u32, Vec<PendingPrompt>>,
     capi: CapiState,
     alert_throttler: AlertThrottler,
+    runtime_health: RuntimeHealth,
     last_endpoint_refresh: Instant,
 }
 
@@ -67,8 +68,13 @@ impl RuntimePipeline {
             pending_prompts: BTreeMap::new(),
             capi: CapiState::new(injection_keywords),
             alert_throttler: AlertThrottler::default(),
+            runtime_health: RuntimeHealth::full(),
             last_endpoint_refresh: Instant::now(),
         })
+    }
+
+    pub fn set_runtime_health(&mut self, runtime_health: RuntimeHealth) {
+        self.runtime_health = runtime_health;
     }
 
     pub fn process_raw_event_bytes(
@@ -76,8 +82,8 @@ impl RuntimePipeline {
         raw: &[u8],
         sink: &mut dyn Write,
         dry_run: bool,
-    ) -> Result<usize> {
-        let mut emitted = 0;
+    ) -> Result<Vec<AlertRecord>> {
+        let mut emitted = Vec::new();
         let events = self
             .collector
             .process_bytes(raw)
@@ -87,12 +93,12 @@ impl RuntimePipeline {
             match &collected.event {
                 OwnedEvent::ContentFrag(evt) => self.process_content_fragment(evt),
                 _ => {
-                    emitted += self.process_owned_event(
+                    emitted.extend(self.process_owned_event(
                         collected.ingest_seq,
                         &collected.event,
                         sink,
                         dry_run,
-                    )?;
+                    )?);
                 }
             }
         }
@@ -113,11 +119,11 @@ impl RuntimePipeline {
         event: &OwnedEvent,
         sink: &mut dyn Write,
         dry_run: bool,
-    ) -> Result<usize> {
+    ) -> Result<Vec<AlertRecord>> {
         match event {
             OwnedEvent::ContentFrag(evt) => {
                 self.process_content_fragment(evt);
-                Ok(0)
+                Ok(Vec::new())
             }
             _ => self.process_owned_event(ingest_seq, event, sink, dry_run),
         }
@@ -153,8 +159,8 @@ impl RuntimePipeline {
         event: &OwnedEvent,
         sink: &mut dyn Write,
         dry_run: bool,
-    ) -> Result<usize> {
-        let mut emitted = 0;
+    ) -> Result<Vec<AlertRecord>> {
+        let mut emitted = Vec::new();
         for normalized in self.normalizer.apply(ingest_seq, event) {
             self.apply_state(&normalized);
             self.drain_pending_prompts_for_event(&normalized);
@@ -169,7 +175,14 @@ impl RuntimePipeline {
             self.observe_capi_file_event(&normalized);
             findings.extend(self.capi_findings_for_event(&normalized, &findings));
             for finding in findings {
-                emitted += usize::from(emit_finding(&mut self.alert_throttler, sink, &finding)?);
+                if let Some(alert) = emit_finding(
+                    &mut self.alert_throttler,
+                    sink,
+                    &finding,
+                    &self.runtime_health,
+                )? {
+                    emitted.push(alert);
+                }
             }
         }
         Ok(emitted)
@@ -404,14 +417,15 @@ fn emit_finding(
     throttler: &mut AlertThrottler,
     sink: &mut dyn Write,
     finding: &Finding,
-) -> Result<bool> {
-    let Some(alert) = throttler.project(finding) else {
-        return Ok(false);
+    runtime_health: &RuntimeHealth,
+) -> Result<Option<AlertRecord>> {
+    let Some(alert) = throttler.project_with_health(finding, runtime_health) else {
+        return Ok(None);
     };
     let value = alert.as_value()?;
     validate(&value).context("validate alert against schema")?;
     emit_ndjson_line(sink, &value)?;
-    Ok(true)
+    Ok(Some(alert))
 }
 
 #[cfg(test)]

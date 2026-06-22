@@ -44,7 +44,7 @@ VERISKEIN_EVENT_MAPS
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 8192);
+    __uint(max_entries, PENDING_ARGS_MAX_ENTRIES);
     __type(key, __u32);
     __type(value, struct connect_args_state);
 } connect_args SEC(".maps");

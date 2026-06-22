@@ -1,17 +1,2 @@
-keywords = [
-  "ignore previous instructions",
-  "disregard above",
-  "system prompt",
-  "run this command",
-  "execute the following",
-  "open a shell",
-  "rm -rf",
-  "/etc/shadow",
-  "exfiltrate",
-  "curl",
-  "base64 -d",
-  "eval",
-  "read the file and",
-  "leak the",
-  "send to http",
-]
+# Optional overrides. Leave empty to use the built-in detector defaults.
+keywords = []

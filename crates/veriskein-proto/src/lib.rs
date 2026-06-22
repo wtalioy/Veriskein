@@ -6,14 +6,19 @@ pub mod defaults;
 
 mod contracts;
 mod kinds;
+mod net;
 mod owned;
 mod parse;
 mod test_support;
 mod types;
 mod wire;
 
+#[cfg(test)]
+mod tests;
+
 pub use contracts::{DETECTOR_INPUTS, RECONCILERS, REGISTRY_OWNERS};
 pub use kinds::{ContentChannel, ContentDirection, DropReason, EventKind};
+pub use net::{AF_INET_RAW, AF_INET6_RAW, net_addr_from_raw, raw_net_addr};
 pub use owned::{
     EventRef, FdDupEffect, OwnedContentFragEvent, OwnedEvent, OwnedFdDupEvent, OwnedFileOpenEvent,
     OwnedFileRenameEvent, OwnedFileUnlinkEvent, OwnedMetaDropEvent, OwnedNetConnectEvent,

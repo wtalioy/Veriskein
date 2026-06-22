@@ -1554,6 +1554,7 @@ version = "1.52.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6"
 dependencies = [
+ "bytes",
  "libc",
  "mio",
  "pin-project-lite",
@@ -1810,6 +1811,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "veriskein-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tokio",
+ "veriskein-ipc",
+]
+
+[[package]]
 name = "veriskein-collector"
 version = "0.1.0"
 dependencies = [
@@ -1861,6 +1873,7 @@ dependencies = [
  "veriskein-correlator",
  "veriskein-detectors",
  "veriskein-graph",
+ "veriskein-ipc",
  "veriskein-normalizer",
  "veriskein-proto",
  "veriskein-state-net",
@@ -1891,6 +1904,12 @@ dependencies = [
 [[package]]
 name = "veriskein-ipc"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "veriskein-proto",
+]
 
 [[package]]
 name = "veriskein-normalizer"
@@ -1907,6 +1926,10 @@ dependencies = [
 [[package]]
 name = "veriskein-perf"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "veriskein-proto"

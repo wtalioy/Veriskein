@@ -62,3 +62,7 @@ Phase 4 fixtures:
 - `cross_agent_prompt_injection.jsonl`: file artifact -> downstream TLS prompt -> shell.
 - `cross_agent_prompt_injection_parallel_streams.jsonl`: overlapping TLS streams do not merge.
 - `alert_redaction.jsonl`: CAPI still scores while secret-looking excerpts are redacted.
+
+Phase 3 fixture:
+
+- `tls_prompt_same_session.jsonl`: TLS prompt -> same-session sensitive file alert with `prompt_ref`.

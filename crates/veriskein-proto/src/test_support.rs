@@ -153,7 +153,7 @@ impl EventFixture {
             header: self.header(EventKind::NetConnect, 0),
             sockfd,
             connect_ret: 0,
-            family: 2,
+            family: crate::AF_INET_RAW,
             dport_be: dport.to_be(),
             sport_be: 0,
             tls_candidate: u8::from(tls_candidate),

@@ -38,3 +38,16 @@ fn synthesizes_reorder_event() {
     }
     assert_eq!(collector.counters().reorder_or_drop_total, 1);
 }
+
+#[test]
+fn independent_bpf_sources_do_not_create_false_reorders() {
+    let mut collector = CollectorCore::new();
+    let proc_exec = EventFixture::new(1, 10, 101, 101, 1, "a").exec("/bin/a", &["a"]);
+    let file_open = EventFixture::new(1, 1, 101, 101, 1, "a").open(-100, 3, "/tmp/a");
+    let net_connect = EventFixture::new(1, 1, 101, 101, 1, "a").connect(3, 443, true);
+
+    assert_eq!(collector.process_bytes(&proc_exec).expect("proc").len(), 1);
+    assert_eq!(collector.process_bytes(&file_open).expect("fs").len(), 1);
+    assert_eq!(collector.process_bytes(&net_connect).expect("net").len(), 1);
+    assert_eq!(collector.counters().reorder_or_drop_total, 0);
+}

@@ -82,6 +82,7 @@ run_scenario() {
   local alerts="${run_dir}/alerts.jsonl"
   local daemon_log="${run_dir}/daemon.log"
   local daemon_pid=""
+  local daemon_args=()
 
   echo "RUN ${slug}"
 
@@ -101,6 +102,10 @@ run_scenario() {
     "${scenario_dir}/setup.sh"
   fi
 
+  if [[ -f "${scenario_dir}/daemon_args" ]]; then
+    mapfile -t daemon_args < <(sed '/^[[:space:]]*$/d' "${scenario_dir}/daemon_args")
+  fi
+
   cleanup_daemon() {
     if [[ -n "${daemon_pid}" ]] && kill -0 "${daemon_pid}" 2>/dev/null; then
       kill -TERM "${daemon_pid}" 2>/dev/null || true
@@ -113,6 +118,7 @@ run_scenario() {
   VERISKEIN_CONFIG_ROOT="${config_root}" "${DAEMON_BIN}" \
     --workspace "${workspace}" \
     --alert-output "${alerts}" \
+    "${daemon_args[@]}" \
     >"${daemon_log}" 2>&1 </dev/null &
   daemon_pid="$!"
 

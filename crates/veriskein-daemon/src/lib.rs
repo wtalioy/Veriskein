@@ -3,6 +3,7 @@
 mod driver;
 mod enrich;
 mod entry;
+mod ipc;
 pub mod pipeline;
 mod preflight;
 
