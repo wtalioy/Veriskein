@@ -288,7 +288,7 @@ impl CapiState {
 }
 
 fn capi_window_ns() -> u64 {
-    veriskein_proto::defaults::CAPI_WINDOW_MS * 1_000_000
+    veriskein_proto::defaults::ms_to_ns(veriskein_proto::defaults::CAPI_WINDOW_MS)
 }
 
 #[cfg(test)]

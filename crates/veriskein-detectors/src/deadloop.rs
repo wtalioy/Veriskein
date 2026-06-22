@@ -23,7 +23,7 @@ impl DeadloopDetector {
         prompt_evidence: &[PromptEvidence],
     ) -> Option<Finding> {
         let session_id = binding.session_id.hex();
-        let window_ns = defaults::DEADLOOP_WINDOW_S * 1_000_000_000;
+        let window_ns = defaults::secs_to_ns(defaults::DEADLOOP_WINDOW_S);
         let session = self.sessions.entry(session_id.clone()).or_default();
         let progress = signals.iter().any(|signal| match signal {
             DetectorSignal::SessionProgressSignal(progress) => !progress.path.is_empty(),
@@ -87,7 +87,7 @@ impl DeadloopDetector {
 
         self.cooldown_until_ns.insert(
             session_id.clone(),
-            event.ts_ns + defaults::DEADLOOP_ALERT_COOLDOWN_S * 1_000_000_000,
+            event.ts_ns + defaults::secs_to_ns(defaults::DEADLOOP_ALERT_COOLDOWN_S),
         );
         Some(deadloop_finding(
             event,

@@ -22,8 +22,7 @@ use veriskein_normalizer::{
 use veriskein_proto::{OwnedContentFragEvent, OwnedEvent, defaults};
 use veriskein_state_net::StateNet;
 
-use crate::enrich::enrich_event_from_procfs;
-use crate::env::env_evidence_for_pid;
+use crate::enrich::{enrich_event_from_procfs, env_evidence_for_pid};
 
 pub struct RuntimePipeline {
     collector: CollectorCore,
@@ -268,7 +267,7 @@ impl RuntimePipeline {
     }
 
     fn evict_pending_prompts(&mut self, now_ns: u64) {
-        let ttl_ns = defaults::PROMPT_WINDOW_MS * 1_000_000;
+        let ttl_ns = defaults::ms_to_ns(defaults::PROMPT_WINDOW_MS);
         self.pending_prompts.retain(|_, prompts| {
             prompts.retain(|prompt| prompt.ts_ns.saturating_add(ttl_ns) >= now_ns);
             !prompts.is_empty()

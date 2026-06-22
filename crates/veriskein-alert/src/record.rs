@@ -276,7 +276,7 @@ impl AlertThrottler {
         }
         let mut alert = AlertRecord::from_finding(finding);
         let key = throttle_key(&alert);
-        let window_ns = defaults::ALERT_DEDUP_SECS * 1_000_000_000;
+        let window_ns = defaults::secs_to_ns(defaults::ALERT_DEDUP_SECS);
         self.entries.retain(|entry_key, entry| {
             entry_key == &key || alert.ts_ns.saturating_sub(entry.first_alert.ts_ns) < window_ns
         });

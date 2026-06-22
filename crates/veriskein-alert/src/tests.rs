@@ -3,6 +3,7 @@ use veriskein_detectors::{
     Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
     VisibilityState,
 };
+use veriskein_proto::defaults;
 
 use crate::{AlertRecord, AlertThrottler, sample_alert_value, validate};
 
@@ -162,10 +163,10 @@ fn throttler_suppresses_and_merges_inside_window() {
     first.ts_ns = 1_000;
     first.objects.event_ids = vec!["evt-1".to_string()];
     let mut second = first.clone();
-    second.ts_ns = first.ts_ns + 10_000_000_000;
+    second.ts_ns = first.ts_ns + defaults::secs_to_ns(10);
     second.objects.event_ids = vec!["evt-2".to_string()];
     let mut third = first.clone();
-    third.ts_ns = first.ts_ns + 61_000_000_000;
+    third.ts_ns = first.ts_ns + defaults::secs_to_ns(61);
     third.objects.event_ids = vec!["evt-3".to_string()];
 
     assert!(throttler.project(&first).is_some());

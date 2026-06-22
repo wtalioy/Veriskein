@@ -1,6 +1,7 @@
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -8,11 +9,11 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 #[cfg(test)]
 use tokio::sync::oneshot::{self, error::TryRecvError};
 use tracing::info;
+use veriskein_alert::stdout_sink;
 use veriskein_bpf::{BpfRuntimeConfig, RuntimeEventSource};
+use veriskein_collector::CollectorCounters;
 
 use crate::Cli;
-use crate::metrics::MetricsTick;
-use crate::output::open_sink;
 use crate::pipeline::RuntimePipeline;
 use crate::preflight::preflight;
 
@@ -78,6 +79,68 @@ fn load_bpf_runtime_config(config_root: &Path) -> Result<BpfRuntimeConfig> {
         config.openssl_soname_allowlist = BpfRuntimeConfig::default().openssl_soname_allowlist;
     }
     Ok(config)
+}
+
+fn open_sink(path: Option<&Path>) -> Result<Box<dyn Write + Send>> {
+    match path {
+        Some(path) => {
+            let file = File::create(path)
+                .with_context(|| format!("create alert output file {}", path.display()))?;
+            Ok(Box::new(BufWriter::new(file)))
+        }
+        None => Ok(stdout_sink()),
+    }
+}
+
+struct MetricsTick {
+    last_at: Instant,
+    last_raw_events: u64,
+    last_drops: u64,
+    last_detector_fires: u64,
+    detector_fires_total: u64,
+}
+
+impl MetricsTick {
+    fn new() -> Self {
+        Self {
+            last_at: Instant::now(),
+            last_raw_events: 0,
+            last_drops: 0,
+            last_detector_fires: 0,
+            detector_fires_total: 0,
+        }
+    }
+
+    fn add_detector_fires(&mut self, count: usize) {
+        self.detector_fires_total += count as u64;
+    }
+
+    fn maybe_log(&mut self, counters: &CollectorCounters) {
+        let elapsed = self.last_at.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        let secs = elapsed.as_secs_f64();
+        let raw_delta = counters
+            .raw_events_total
+            .saturating_sub(self.last_raw_events);
+        let drop_delta = counters
+            .reorder_or_drop_total
+            .saturating_sub(self.last_drops);
+        let fire_delta = self
+            .detector_fires_total
+            .saturating_sub(self.last_detector_fires);
+        info!(
+            events_per_s = raw_delta as f64 / secs,
+            drops_per_s = drop_delta as f64 / secs,
+            detector_fires_per_s = fire_delta as f64 / secs,
+            "veriskein metrics"
+        );
+        self.last_at = Instant::now();
+        self.last_raw_events = counters.raw_events_total;
+        self.last_drops = counters.reorder_or_drop_total;
+        self.last_detector_fires = self.detector_fires_total;
+    }
 }
 
 trait EventSource {
@@ -191,9 +254,8 @@ mod tests {
     use tokio::sync::oneshot;
     use veriskein_proto::{ContentChannel, ContentDirection, EventFixture};
 
-    use super::{EventSource, Result, Shutdown, run_with_source_and_sink};
+    use super::{EventSource, Result, Shutdown, open_sink, run_with_source_and_sink};
     use crate::Cli;
-    use crate::output::open_sink;
 
     struct FakeSource {
         events: Arc<Mutex<VecDeque<Vec<u8>>>>,

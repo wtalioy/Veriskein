@@ -1,4 +1,15 @@
 pub const EVT_ABI_VERSION: u32 = 2;
+pub const NS_PER_MS: u64 = 1_000_000;
+pub const NS_PER_SEC: u64 = 1_000_000_000;
+
+pub const fn ms_to_ns(ms: u64) -> u64 {
+    ms * NS_PER_MS
+}
+
+pub const fn secs_to_ns(secs: u64) -> u64 {
+    secs * NS_PER_SEC
+}
+
 // These inline capacities must stay in lockstep with the BPF-side structs.
 pub const TASK_COMM_LEN: usize = 16;
 pub const PATH_INLINE_MAX: usize = 256;

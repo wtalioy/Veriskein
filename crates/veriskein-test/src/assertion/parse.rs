@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, de};
 use serde_json::{Map, Value};
 
-use super::spec::{Criterion, MatchSpec};
+use super::{Criterion, MatchSpec, get_map_path};
 
 impl<'de> Deserialize<'de> for MatchSpec {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
@@ -309,18 +309,9 @@ impl<'a> MatchParser<'a> {
             .get(dotted_key)
             .map(|value| (dotted_key.to_string(), value))
             .or_else(|| {
-                get_nested_key(self.root, nested_path).map(|value| (nested_path.join("."), value))
+                get_map_path(self.root, nested_path).map(|value| (nested_path.join("."), value))
             })
     }
-}
-
-fn get_nested_key<'a>(root: &'a Map<String, Value>, path: &[&str]) -> Option<&'a Value> {
-    let (first, rest) = path.split_first()?;
-    let mut value = root.get(*first)?;
-    for key in rest {
-        value = value.get(*key)?;
-    }
-    Some(value)
 }
 
 fn expect_string<E>(value: &Value, label: &str) -> std::result::Result<String, E>

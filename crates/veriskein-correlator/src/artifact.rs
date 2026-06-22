@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::Serialize;
 use veriskein_proto::{AgentId, ArtifactId, SessionId, VisibilityState, defaults};
 
-use crate::matching::ContentSignature;
+use crate::matching::{ContentSignature, hex16};
 use crate::{RedactionMode, redact_excerpt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -124,10 +124,6 @@ impl ArtifactStore {
             }
         }
     }
-}
-
-fn hex16(bytes: [u8; 16]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ use veriskein_normalizer::{
     NormalizedData, NormalizedEvent, PathContext, PathResolution, PathResolutionMode, PathVerdict,
     ProcessSnapshot, WorkspaceRef,
 };
-use veriskein_proto::EventKind;
+use veriskein_proto::{EventKind, defaults};
 
 use veriskein_correlator::{PromptEvidence, PromptEvidenceKind};
 
@@ -99,7 +99,7 @@ fn net_connect_event(seq: u64, pid: u32, ip: &str, port: u16) -> NormalizedEvent
     NormalizedEvent {
         ingest_seq: seq,
         event_id: format!("net-{seq}"),
-        ts_ns: seq * 1_000_000,
+        ts_ns: defaults::ms_to_ns(seq),
         kind: EventKind::NetConnect,
         process: process(pid, "/usr/bin/claude", "claude", "/tmp/ws"),
         data: NormalizedData::NetConnect {
@@ -116,7 +116,7 @@ fn file_open_event(seq: u64, pid: u32, path: &str) -> NormalizedEvent {
     NormalizedEvent {
         ingest_seq: seq,
         event_id: format!("file-{seq}"),
-        ts_ns: seq * 1_000_000,
+        ts_ns: defaults::ms_to_ns(seq),
         kind: EventKind::FileOpen,
         process: process(pid, "/usr/bin/claude", "claude", "/tmp/ws"),
         data: NormalizedData::FileOpen {
@@ -131,7 +131,7 @@ fn workspace_write_event(seq: u64, pid: u32, path: &str) -> NormalizedEvent {
     NormalizedEvent {
         ingest_seq: seq,
         event_id: format!("write-{seq}"),
-        ts_ns: seq * 1_000_000,
+        ts_ns: defaults::ms_to_ns(seq),
         kind: EventKind::FileOpen,
         process: process(pid, "/usr/bin/claude", "claude", "/tmp/ws"),
         data: NormalizedData::FileOpen {
@@ -146,7 +146,7 @@ fn sensitive_file_open_event(seq: u64, pid: u32, path: &str) -> NormalizedEvent 
     NormalizedEvent {
         ingest_seq: seq,
         event_id: format!("sensitive-file-{seq}"),
-        ts_ns: seq * 1_000_000,
+        ts_ns: defaults::ms_to_ns(seq),
         kind: EventKind::FileOpen,
         process: process(pid, "/usr/bin/claude", "claude", "/tmp/ws"),
         data: NormalizedData::FileOpen {

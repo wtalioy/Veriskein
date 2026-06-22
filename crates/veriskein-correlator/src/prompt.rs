@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 use veriskein_proto::{AgentId, ContentChannel, PromptId, SessionId, VisibilityState, defaults};
 
-use crate::matching::ContentSignature;
+use crate::matching::{ContentSignature, hex16};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptInput {
@@ -204,7 +204,7 @@ impl PromptStore {
             .filter(|prompt| {
                 prompt
                     .ts_end
-                    .saturating_add(defaults::PROMPT_WINDOW_MS * 1_000_000)
+                    .saturating_add(defaults::ms_to_ns(defaults::PROMPT_WINDOW_MS))
                     >= now_ns
             })
         {
@@ -305,16 +305,12 @@ fn risk_window_ns(risk_kind: &str) -> Option<u64> {
         "net_connect" | "single_agent_deadloop" => 180,
         _ => return None,
     };
-    Some(seconds * 1_000_000_000)
+    Some(defaults::secs_to_ns(seconds))
 }
 
 fn max_prompt_retention_ns() -> u64 {
-    (defaults::CAPI_WINDOW_MS * 1_000_000)
+    defaults::ms_to_ns(defaults::CAPI_WINDOW_MS)
         .max(risk_window_ns("single_agent_deadloop").unwrap_or_default())
-}
-
-fn hex16(bytes: [u8; 16]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 impl From<&PromptObject> for PromptSnapshot {
@@ -337,7 +333,7 @@ impl From<&PromptObject> for PromptSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use veriskein_proto::{ContentChannel, SessionId, VisibilityState};
+    use veriskein_proto::{ContentChannel, SessionId, VisibilityState, defaults};
 
     use super::{PromptEvidenceKind, PromptInput, PromptStore};
 
@@ -389,18 +385,23 @@ mod tests {
 
         assert!(
             store
-                .link_risky_event(session_id, "shell", 31_000_000_000, "proc_exec")
+                .link_risky_event(session_id, "shell", defaults::secs_to_ns(31), "proc_exec")
                 .is_empty()
         );
         assert_eq!(
             store
-                .link_risky_event(session_id, "sensitive", 60_000_000_000, "file_open")
+                .link_risky_event(
+                    session_id,
+                    "sensitive",
+                    defaults::secs_to_ns(60),
+                    "file_open"
+                )
                 .len(),
             1
         );
         assert_eq!(
             store
-                .link_risky_event(session_id, "loop", 180_000_000_000, "net_connect")
+                .link_risky_event(session_id, "loop", defaults::secs_to_ns(180), "net_connect")
                 .len(),
             1
         );
@@ -451,8 +452,13 @@ mod tests {
         let mut store = PromptStore::default();
         let prompt_id = store.insert(input(session_id, 0, b"cross-session content"));
 
-        let evidence =
-            store.evidence_for_event(session_id, "evt-risk", 240_000_000_000, "net_connect", 99);
+        let evidence = store.evidence_for_event(
+            session_id,
+            "evt-risk",
+            defaults::secs_to_ns(240),
+            "net_connect",
+            99,
+        );
 
         assert!(evidence.is_empty());
         assert!(store.snapshot(prompt_id).is_some());

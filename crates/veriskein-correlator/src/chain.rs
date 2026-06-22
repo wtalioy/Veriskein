@@ -145,7 +145,8 @@ pub fn build_evidence_chain(input: ChainInput<'_>) -> Option<EvidenceChain> {
     if input.artifact.ts_ns > input.prompt.ts_start || input.prompt.ts_end > input.risky_ts_ns {
         return None;
     }
-    if input.risky_ts_ns.saturating_sub(input.prompt.ts_end) > defaults::CAPI_WINDOW_MS * 1_000_000
+    if input.risky_ts_ns.saturating_sub(input.prompt.ts_end)
+        > defaults::ms_to_ns(defaults::CAPI_WINDOW_MS)
     {
         return None;
     }
@@ -153,11 +154,12 @@ pub fn build_evidence_chain(input: ChainInput<'_>) -> Option<EvidenceChain> {
     let mut component_scores = BTreeMap::new();
     component_scores.insert("match_score", input.candidate.match_score);
     component_scores.insert("session_bonus", 0.15);
-    let window_bonus = if input.risky_ts_ns.saturating_sub(input.prompt.ts_end) <= 30_000_000_000 {
-        0.15
-    } else {
-        0.0
-    };
+    let window_bonus =
+        if input.risky_ts_ns.saturating_sub(input.prompt.ts_end) <= defaults::secs_to_ns(30) {
+            0.15
+        } else {
+            0.0
+        };
     component_scores.insert("window_bonus", window_bonus);
     component_scores.insert("risk_kind_bonus", input.risky_kind.bonus());
     let keyword_bonus = if hits_keyword(

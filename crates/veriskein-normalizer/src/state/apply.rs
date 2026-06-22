@@ -145,11 +145,11 @@ impl Normalizer {
         let pid = evt.header.pid;
         let snapshot = self.snapshot_for(pid, &evt.header);
         if let Some(mut exiting) = self.processes.remove(&pid) {
-            exiting.expired_at_ns = Some(
-                evt.header
-                    .ts_ns
-                    .saturating_add(veriskein_proto::defaults::EXPIRING_PROC_HOLD_MS * 1_000_000),
-            );
+            exiting.expired_at_ns = Some(evt.header.ts_ns.saturating_add(
+                veriskein_proto::defaults::ms_to_ns(
+                    veriskein_proto::defaults::EXPIRING_PROC_HOLD_MS,
+                ),
+            ));
             self.expiring.insert(pid, exiting);
         }
         vec![self.normalized_event(

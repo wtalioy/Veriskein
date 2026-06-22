@@ -93,6 +93,10 @@ pub(crate) fn hash16(bytes: &[u8]) -> [u8; 16] {
     out
 }
 
+pub(crate) fn hex16(bytes: [u8; 16]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn strip_markdown_fences(text: &str) -> String {
     let mut out = String::new();
     let mut in_fence = false;

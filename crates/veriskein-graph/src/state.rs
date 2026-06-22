@@ -11,8 +11,6 @@ use veriskein_proto::{AgentId, AttributionStrength, Role, RoleTag, SessionId, de
 use crate::AgentConfig;
 use crate::evidence::EnvEvidence;
 
-mod roles;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
     RootCandidate,
@@ -216,6 +214,57 @@ impl GraphState {
         &self.delete_allowlist
     }
 
+    fn apply_role(&self, attribution: &mut Attribution, event: &NormalizedEvent, filename: &str) {
+        let next = self.classify_role(attribution, event, filename);
+        if role_rank(next) > role_rank(attribution.role) {
+            attribution.role = next;
+            attribution.role_version += 1;
+        }
+    }
+
+    fn classify_role(
+        &self,
+        attribution: &Attribution,
+        event: &NormalizedEvent,
+        filename: &str,
+    ) -> Role {
+        if event.process.pid == attribution.root_pid {
+            return Role::RootAgent;
+        }
+        let name = path_basename(filename);
+        if matches!(name, "sh" | "bash" | "zsh" | "dash" | "fish")
+            && self
+                .resolve(event.process.ppid)
+                .is_some_and(|parent| parent.role == Role::RootAgent)
+        {
+            return Role::ShellTool;
+        }
+        if matches!(
+            name,
+            "python"
+                | "python3"
+                | "node"
+                | "ruby"
+                | "go"
+                | "cargo"
+                | "rustc"
+                | "gcc"
+                | "clang"
+                | "make"
+                | "npm"
+                | "pip"
+        ) {
+            return Role::ToolWorker;
+        }
+        if self
+            .resolve(event.process.ppid)
+            .is_some_and(|parent| parent.role == Role::RootAgent)
+        {
+            return Role::SubAgent;
+        }
+        Role::Unknown
+    }
+
     fn seed_root_candidate(
         &mut self,
         event: &NormalizedEvent,
@@ -256,7 +305,7 @@ impl GraphState {
             attribution_strength: strength_for_evidence(&evidence),
             root_evidence: evidence,
             revocable_until_ns: Some(
-                event.ts_ns + defaults::AGENT_PROMOTION_WINDOW_S * 1_000_000_000,
+                event.ts_ns + defaults::secs_to_ns(defaults::AGENT_PROMOTION_WINDOW_S),
             ),
         };
         self.confirm_if_ready(&mut attribution);
@@ -354,7 +403,7 @@ impl GraphState {
                 ts_ns: event.ts_ns,
             }],
             revocable_until_ns: Some(
-                event.ts_ns + defaults::AGENT_PROMOTION_WINDOW_S * 1_000_000_000,
+                event.ts_ns + defaults::secs_to_ns(defaults::AGENT_PROMOTION_WINDOW_S),
             ),
         };
         self.confirm_if_ready(&mut attribution);
@@ -399,7 +448,7 @@ impl GraphState {
             pid,
             DrainingBinding {
                 attribution: attribution.clone(),
-                expires_at_ns: event.ts_ns + defaults::SESSION_DRAIN_SECS * 1_000_000_000,
+                expires_at_ns: event.ts_ns + defaults::secs_to_ns(defaults::SESSION_DRAIN_SECS),
             },
         );
         Some(attribution)
@@ -522,5 +571,16 @@ fn strength_for_evidence(evidence: &[RootEvidence]) -> AttributionStrength {
         AttributionStrength::Medium
     } else {
         AttributionStrength::Weak
+    }
+}
+
+fn role_rank(role: Role) -> u8 {
+    match role {
+        Role::Unknown => 0,
+        Role::SubAgent => 1,
+        Role::ToolWorker => 2,
+        Role::ShellTool => 3,
+        Role::McpServer => 4,
+        Role::RootAgent => 5,
     }
 }

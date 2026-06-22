@@ -370,7 +370,7 @@ fn connect_only_stays_candidate_until_expiry() {
     assert_eq!(candidate.state, SessionState::RootCandidate);
 
     graph.apply(&event(
-        1 + defaults::AGENT_PROMOTION_WINDOW_S * 1_000_000_000,
+        1 + defaults::secs_to_ns(defaults::AGENT_PROMOTION_WINDOW_S),
         "evt-expire",
         EventKind::FileOpen,
         process(999, "/usr/bin/other"),
@@ -517,7 +517,7 @@ fn exit_moves_binding_to_draining_until_timeout() {
     );
 
     graph.apply(&event(
-        3 + defaults::SESSION_DRAIN_SECS * 1_000_000_000,
+        3 + defaults::secs_to_ns(defaults::SESSION_DRAIN_SECS),
         "evt-expire",
         EventKind::FileOpen,
         process(999, "/usr/bin/other"),
