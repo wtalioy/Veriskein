@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::Serialize;
 use veriskein_normalizer::{NormalizedData, NormalizedEvent};
 use veriskein_proto::{ContentDirection, FdDupEffect, VisibilityState, defaults, fd_dup_effect};
+use veriskein_retention::BoundedMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct FdIdentitySnapshot {
@@ -134,15 +135,26 @@ impl Default for StateNetLimits {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StateNet {
     limits: StateNetLimits,
     versions: BTreeMap<(u32, i32), u32>,
-    fds: BTreeMap<(u32, i32), FdIdentitySnapshot>,
-    fd_order: VecDeque<((u32, i32), u64)>,
+    fds: BoundedMap<(u32, i32), FdIdentitySnapshot>,
     endpoints: VecDeque<EndpointSnapshot>,
-    tls_associations: BTreeMap<(u32, u64, u8), TlsAssociationSnapshot>,
-    tls_association_order: VecDeque<((u32, u64, u8), u64)>,
+    tls_associations: BoundedMap<(u32, u64, u8), TlsAssociationSnapshot>,
+}
+
+impl Default for StateNet {
+    fn default() -> Self {
+        let limits = StateNetLimits::default();
+        Self {
+            limits,
+            versions: BTreeMap::new(),
+            fds: BoundedMap::new(limits.max_fd_identities),
+            endpoints: VecDeque::new(),
+            tls_associations: BoundedMap::new(limits.max_tls_associations),
+        }
+    }
 }
 
 impl StateNet {
@@ -163,7 +175,10 @@ impl StateNet {
                 max_endpoint_snapshots,
                 max_tls_associations,
             },
-            ..Self::default()
+            versions: BTreeMap::new(),
+            fds: BoundedMap::new(max_fd_identities),
+            endpoints: VecDeque::new(),
+            tls_associations: BoundedMap::new(max_tls_associations),
         }
     }
 
@@ -175,7 +190,7 @@ impl StateNet {
                 flags: _,
             } if *ret_fd >= 0 => {
                 let version = self.bump_version(event.process.pid, *ret_fd);
-                self.fds.insert(
+                self.remember_fd(
                     (event.process.pid, *ret_fd),
                     FdIdentitySnapshot::file(
                         event.process.pid,
@@ -185,7 +200,6 @@ impl StateNet {
                         path.preferred_path_string(),
                     ),
                 );
-                self.remember_fd(event.process.pid, *ret_fd, event.ts_ns);
             }
             NormalizedData::FdDup {
                 oldfd,
@@ -286,8 +300,7 @@ impl StateNet {
                 snapshot.fd = newfd;
                 snapshot.fd_version = version;
                 snapshot.ts_ns = event.ts_ns;
-                self.fds.insert((pid, newfd), snapshot);
-                self.remember_fd(pid, newfd, event.ts_ns);
+                self.remember_fd((pid, newfd), snapshot);
             }
             FdDupEffect::Noop => {}
         }
@@ -307,11 +320,10 @@ impl StateNet {
             ip: ip.to_string(),
             port,
         };
-        self.fds.insert(
+        self.remember_fd(
             (pid, sockfd),
             FdIdentitySnapshot::socket(pid, sockfd, version, event.ts_ns, endpoint.clone()),
         );
-        self.remember_fd(pid, sockfd, event.ts_ns);
         self.endpoints.push_back(EndpointSnapshot::from_connect(
             event,
             sockfd,
@@ -341,7 +353,6 @@ impl StateNet {
         };
         self.tls_associations
             .insert((pid, ssl_ctx, direction as u8), snapshot);
-        self.remember_tls_association(pid, ssl_ctx, direction, event.ts_ns);
     }
 
     fn close_fd(&mut self, pid: u32, fd: i32) {
@@ -360,52 +371,15 @@ impl StateNet {
         *self.versions.entry((pid, fd)).or_insert(1)
     }
 
-    fn remember_fd(&mut self, pid: u32, fd: i32, ts_ns: u64) {
-        let key = (pid, fd);
-        self.fd_order.push_back((key, ts_ns));
-    }
-
-    fn remember_tls_association(
-        &mut self,
-        pid: u32,
-        ssl_ctx: u64,
-        direction: ContentDirection,
-        ts_ns: u64,
-    ) {
-        let key = (pid, ssl_ctx, direction as u8);
-        self.tls_association_order.push_back((key, ts_ns));
+    fn remember_fd(&mut self, key: (u32, i32), snapshot: FdIdentitySnapshot) {
+        for ((pid, fd), _) in self.fds.insert(key, snapshot) {
+            self.remove_tls_associations_for_fd(pid, fd);
+        }
     }
 
     fn prune(&mut self) {
         while self.endpoints.len() > self.limits.max_endpoint_snapshots {
             self.endpoints.pop_front();
-        }
-
-        while self.tls_associations.len() > self.limits.max_tls_associations {
-            let Some((key, ts_ns)) = self.tls_association_order.pop_front() else {
-                break;
-            };
-            if self
-                .tls_associations
-                .get(&key)
-                .is_some_and(|association| association.ts_ns == ts_ns)
-            {
-                self.tls_associations.remove(&key);
-            }
-        }
-
-        while self.fds.len() > self.limits.max_fd_identities {
-            let Some(((pid, fd), ts_ns)) = self.fd_order.pop_front() else {
-                break;
-            };
-            if self
-                .fds
-                .get(&(pid, fd))
-                .is_some_and(|snapshot| snapshot.ts_ns == ts_ns)
-                && self.fds.remove(&(pid, fd)).is_some()
-            {
-                self.remove_tls_associations_for_fd(pid, fd);
-            }
         }
 
         while self.versions.len() > self.limits.max_fd_versions {
@@ -424,7 +398,5 @@ impl StateNet {
     fn remove_tls_associations_for_fd(&mut self, pid: u32, fd: i32) {
         self.tls_associations
             .retain(|_, association| association.pid != pid || association.fd != fd);
-        self.tls_association_order
-            .retain(|(key, _)| self.tls_associations.contains_key(key));
     }
 }

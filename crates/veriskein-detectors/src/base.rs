@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
 use veriskein_graph::{Attribution, GraphState};
 use veriskein_normalizer::{NormalizedData, NormalizedEvent, PathResolutionMode, path_basename};
 
-use crate::finding::{Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType};
+use crate::finding::{
+    Finding, FindingEvidence, FindingObjects, FindingParts, FindingType, build_finding,
+};
 use crate::signals::DetectorSignal;
 
 pub(crate) fn detect_unexpected_shell(
@@ -162,33 +163,28 @@ fn path_finding(
     binding: &Attribution,
     input: PathFindingInput,
 ) -> Finding {
-    Finding {
-        finding_type: input.finding_type,
-        ts_ns: event.ts_ns,
-        pid: event.process.pid,
-        tid: event.process.tid,
-        session_id: binding.session_id.hex(),
-        agent_id: Some(binding.agent_id.hex()),
-        reason_code: input.reason_code.to_string(),
-        summary: input.summary,
-        process_comm: event.process.comm.clone(),
-        process_binary: event.process.exe.clone(),
-        workspace: binding.workspace.root.display().to_string(),
-        objects: FindingObjects {
-            paths: vec![input.path.clone()],
-            event_ids: vec![event.event_id.clone()],
-            argv: input.argv,
-            ..FindingObjects::default()
-        },
-        evidence: vec![FindingEvidence::path_event(
-            input.evidence_kind,
-            event.event_id.clone(),
-            event.ingest_seq,
-            input.path,
-            input.evidence_note,
-        )],
-        health: FindingHealth::full(),
-        component_scores: BTreeMap::new(),
-        explanation: None,
-    }
+    build_finding(
+        event,
+        binding,
+        FindingParts::new(
+            input.finding_type,
+            event.ts_ns,
+            binding.session_id.hex(),
+            input.reason_code,
+            input.summary,
+            FindingObjects {
+                paths: vec![input.path.clone()],
+                event_ids: vec![event.event_id.clone()],
+                argv: input.argv,
+                ..FindingObjects::default()
+            },
+            vec![FindingEvidence::path_event(
+                input.evidence_kind,
+                event.event_id.clone(),
+                event.ingest_seq,
+                input.path,
+                input.evidence_note,
+            )],
+        ),
+    )
 }

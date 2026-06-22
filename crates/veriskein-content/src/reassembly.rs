@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use veriskein_proto::VisibilityState;
+use veriskein_retention::BoundedMap;
 
 use crate::{
     ContentFragment, ExtractedPrompt, StreamOwner, StreamProvenance,
@@ -10,10 +11,9 @@ use crate::{
 
 const COMPACT_CONSUMED_THRESHOLD: usize = 4096;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ContentRuntime {
-    streams: BTreeMap<u64, StreamState>,
-    stream_order: VecDeque<u64>,
+    streams: BoundedMap<u64, StreamState>,
     evicted_streams_total: u64,
 }
 
@@ -23,10 +23,20 @@ impl ContentRuntime {
     }
 
     pub fn append(&mut self, fragment: ContentFragment) -> Vec<ExtractedPrompt> {
-        self.enforce_stream_bound(fragment.stream_id);
-        let stream = self.streams.entry(fragment.stream_id).or_insert_with(|| {
-            StreamState::new(fragment.owner.clone(), fragment.provenance.clone())
-        });
+        if !self.streams.contains_key(&fragment.stream_id) {
+            self.evicted_streams_total = self.evicted_streams_total.saturating_add(
+                self.streams
+                    .insert(
+                        fragment.stream_id,
+                        StreamState::new(fragment.owner.clone(), fragment.provenance.clone()),
+                    )
+                    .len() as u64,
+            );
+        }
+        let stream = self
+            .streams
+            .get_mut(&fragment.stream_id)
+            .expect("stream was inserted above");
         stream.append(fragment);
         stream.extract_ready()
     }
@@ -35,7 +45,6 @@ impl ContentRuntime {
         let Some(mut stream) = self.streams.remove(&stream_id) else {
             return Vec::new();
         };
-        self.stream_order.retain(|existing| *existing != stream_id);
         let mut out = stream.extract_ready();
         out.extend(stream.extract_remainder());
         out
@@ -44,23 +53,13 @@ impl ContentRuntime {
     pub fn evicted_streams_total(&self) -> u64 {
         self.evicted_streams_total
     }
+}
 
-    fn enforce_stream_bound(&mut self, incoming_stream_id: u64) {
-        if self.streams.contains_key(&incoming_stream_id) {
-            return;
-        }
-        self.stream_order.push_back(incoming_stream_id);
-        while self.streams.len() >= veriskein_proto::defaults::MAX_STREAMS {
-            let Some(oldest) = self.stream_order.pop_front() else {
-                return;
-            };
-            if oldest == incoming_stream_id {
-                self.stream_order.push_front(oldest);
-                return;
-            }
-            if self.streams.remove(&oldest).is_some() {
-                self.evicted_streams_total = self.evicted_streams_total.saturating_add(1);
-            }
+impl Default for ContentRuntime {
+    fn default() -> Self {
+        Self {
+            streams: BoundedMap::new(veriskein_proto::defaults::MAX_STREAMS),
+            evicted_streams_total: 0,
         }
     }
 }

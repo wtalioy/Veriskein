@@ -13,6 +13,7 @@ path = "src/lib.rs"
 serde.workspace = true
 veriskein-normalizer = { path = "../veriskein-normalizer" }
 veriskein-proto = { path = "../veriskein-proto" }
+veriskein-retention = { path = "../veriskein-retention" }
 
 [lints]
 workspace = true

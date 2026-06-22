@@ -5,8 +5,7 @@ use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use veriskein_ipc::{
-    HelloFrame, IpcFrame, Topic, decode_ndjson_frame, default_socket_path, encode_ndjson_frame,
-    validate_versions,
+    HelloFrame, IpcFrame, Topic, decode_ndjson, default_socket_path, encode_ndjson,
 };
 
 const CLIENT_NAME: &str = "veriskein-cli";
@@ -49,8 +48,8 @@ async fn tail_ipc(path: PathBuf) -> Result<()> {
         .with_context(|| format!("connect IPC socket {}", path.display()))?;
     let mut reader = BufReader::new(stream);
     let mut hello = HelloFrame::new(CLIENT_NAME);
-    hello.subscriptions = vec![Topic::Alert, Topic::Metrics];
-    let line = encode_ndjson_frame(&IpcFrame::Hello(hello)).context("encode IPC hello")?;
+    hello.subscriptions = vec![Topic::Alert];
+    let line = encode_ndjson(&IpcFrame::Hello(hello)).context("encode IPC hello")?;
     reader
         .get_mut()
         .write_all(line.as_bytes())
@@ -62,11 +61,8 @@ async fn tail_ipc(path: PathBuf) -> Result<()> {
         .read_line(&mut welcome)
         .await
         .context("read IPC welcome")?;
-    match decode_ndjson_frame(&welcome).context("decode IPC welcome")? {
-        IpcFrame::Welcome(frame) => {
-            validate_versions(frame.ipc_version, frame.schema_version)
-                .context("validate IPC welcome")?;
-        }
+    match decode_ndjson(&welcome).context("decode IPC welcome")? {
+        IpcFrame::Welcome(_) => {}
         IpcFrame::Error(frame) => bail!("IPC server error: {:?}: {}", frame.code, frame.message),
         frame => bail!("expected IPC welcome, received {:?}", frame.topic()),
     }
@@ -82,7 +78,7 @@ async fn tail_ipc(path: PathBuf) -> Result<()> {
         {
             return Ok(());
         }
-        match decode_ndjson_frame(&line).context("decode IPC frame")? {
+        match decode_ndjson(&line).context("decode IPC frame")? {
             IpcFrame::Alert(frame) => {
                 let mut alert_line =
                     serde_json::to_string(&frame.alert).context("serialize alert payload")?;

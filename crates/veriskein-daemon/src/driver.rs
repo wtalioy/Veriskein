@@ -15,7 +15,7 @@ use veriskein_alert::{
 };
 use veriskein_bpf::{BpfRuntimeConfig, RuntimeEventSource};
 use veriskein_collector::CollectorCounters;
-use veriskein_ipc::default_socket_path;
+use veriskein_ipc::{QueuePolicy, default_socket_path};
 
 use crate::Cli;
 use crate::ipc::{IpcServer, IpcSettings};
@@ -103,8 +103,6 @@ pub(crate) struct IpcConfig {
 struct LimitsConfig {
     ringbuf_size: Option<usize>,
     ipc_alerts_queue: Option<usize>,
-    ipc_events_queue: Option<usize>,
-    ipc_graph_queue: Option<usize>,
     ipc_client_slow_timeout_ms: Option<u64>,
 }
 
@@ -146,25 +144,19 @@ fn load_defaults_config(config_root: &Path) -> Result<Option<DefaultsConfig>> {
 }
 
 fn ipc_settings_from_defaults(defaults: DefaultsConfig) -> IpcSettings {
-    let default_settings = IpcSettings::default();
+    let default_policy = QueuePolicy::default();
     IpcSettings {
         allow_uids: defaults.ipc.allow_uids,
-        alerts_capacity: defaults
-            .limits
-            .ipc_alerts_queue
-            .unwrap_or(default_settings.alerts_capacity),
-        events_capacity: defaults
-            .limits
-            .ipc_events_queue
-            .unwrap_or(default_settings.events_capacity),
-        graph_capacity: defaults
-            .limits
-            .ipc_graph_queue
-            .unwrap_or(default_settings.graph_capacity),
-        client_slow_timeout_ms: defaults
-            .limits
-            .ipc_client_slow_timeout_ms
-            .unwrap_or(default_settings.client_slow_timeout_ms),
+        queue_policy: QueuePolicy {
+            alerts_capacity: defaults
+                .limits
+                .ipc_alerts_queue
+                .unwrap_or(default_policy.alerts_capacity),
+            client_slow_timeout_ms: defaults
+                .limits
+                .ipc_client_slow_timeout_ms
+                .unwrap_or(default_policy.client_slow_timeout_ms),
+        },
     }
 }
 

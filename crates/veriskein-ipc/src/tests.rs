@@ -36,9 +36,7 @@ fn round_trips_welcome_frame_with_default_queue_policy() {
     assert_eq!(value["schema"]["alert"], SCHEMA_VERSION);
     assert_eq!(value["schema"]["metrics"], SCHEMA_VERSION);
     assert_eq!(decoded, frame);
-    assert_eq!(QueuePolicy::default().events_capacity, IPC_EVENTS_QUEUE);
     assert_eq!(QueuePolicy::default().alerts_capacity, IPC_ALERTS_QUEUE);
-    assert_eq!(QueuePolicy::default().graph_capacity, IPC_GRAPH_QUEUE);
     assert_eq!(
         QueuePolicy::default().client_slow_timeout_ms,
         IPC_CLIENT_SLOW_TIMEOUT_MS
@@ -77,11 +75,7 @@ fn round_trips_metrics_frame() {
     let mut metrics = MetricsSnapshot::new(42);
     metrics.counters.insert("alerts_sent".to_string(), 7);
     metrics.gauges.insert("drop_rate".to_string(), 0.25);
-    metrics.queue_depths = QueueDepths {
-        events: 12,
-        alerts: 3,
-        graph: 5,
-    };
+    metrics.queue_depths = QueueDepths { alerts: 3 };
     let frame = IpcFrame::Metrics(MetricsFrame::new(metrics));
 
     assert_eq!(

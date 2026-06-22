@@ -13,6 +13,7 @@ members = [
     "crates/veriskein-normalizer",
     "crates/veriskein-perf",
     "crates/veriskein-proto",
+    "crates/veriskein-retention",
     "crates/veriskein-state-net",
     "crates/veriskein-test",
 ]

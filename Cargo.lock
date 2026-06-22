@@ -1860,6 +1860,7 @@ dependencies = [
  "serde",
  "serde_json",
  "veriskein-proto",
+ "veriskein-retention",
 ]
 
 [[package]]
@@ -1872,6 +1873,7 @@ dependencies = [
  "toml",
  "unicode-normalization",
  "veriskein-proto",
+ "veriskein-retention",
 ]
 
 [[package]]
@@ -1912,6 +1914,7 @@ dependencies = [
  "veriskein-graph",
  "veriskein-normalizer",
  "veriskein-proto",
+ "veriskein-retention",
 ]
 
 [[package]]
@@ -1945,6 +1948,7 @@ dependencies = [
  "tempfile",
  "toml",
  "veriskein-proto",
+ "veriskein-retention",
 ]
 
 [[package]]
@@ -1969,12 +1973,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "veriskein-retention"
+version = "0.1.0"
+
+[[package]]
 name = "veriskein-state-net"
 version = "0.1.0"
 dependencies = [
  "serde",
  "veriskein-normalizer",
  "veriskein-proto",
+ "veriskein-retention",
 ]
 
 [[package]]

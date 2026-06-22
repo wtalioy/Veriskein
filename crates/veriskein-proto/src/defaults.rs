@@ -47,7 +47,5 @@ pub const MAX_TEMPLATE_IGNORE: usize = 10_000;
 pub const MAX_ALERT_THROTTLE_ENTRIES: usize = 16_384;
 pub const MAX_DEADLOOP_SESSIONS: usize = 16_384;
 pub const IPC_VERSION: u32 = 1;
-pub const IPC_EVENTS_QUEUE: usize = 8192;
 pub const IPC_ALERTS_QUEUE: usize = 1024;
-pub const IPC_GRAPH_QUEUE: usize = 4096;
 pub const IPC_CLIENT_SLOW_TIMEOUT_MS: u64 = 2_000;

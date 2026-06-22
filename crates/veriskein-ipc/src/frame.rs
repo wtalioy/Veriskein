@@ -9,9 +9,7 @@ use crate::{IpcError, IpcResult};
 
 pub const IPC_VERSION: u32 = defaults::IPC_VERSION;
 pub const SCHEMA_VERSION: u32 = defaults::IPC_SCHEMA_VERSION;
-pub const IPC_EVENTS_QUEUE: usize = defaults::IPC_EVENTS_QUEUE;
 pub const IPC_ALERTS_QUEUE: usize = defaults::IPC_ALERTS_QUEUE;
-pub const IPC_GRAPH_QUEUE: usize = defaults::IPC_GRAPH_QUEUE;
 pub const IPC_CLIENT_SLOW_TIMEOUT_MS: u64 = defaults::IPC_CLIENT_SLOW_TIMEOUT_MS;
 pub const DEFAULT_SOCKET_NAME: &str = "veriskein.sock";
 
@@ -77,7 +75,7 @@ impl IpcFrame {
         }
     }
 
-    pub fn validate_versions(&self) -> IpcResult<()> {
+    pub(crate) fn validate_versions(&self) -> IpcResult<()> {
         validate_versions(self.ipc_version(), self.schema_version())
     }
 }
@@ -175,10 +173,7 @@ impl ErrorFrame {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     DecodeError,
-    Internal,
     QueueOverflow,
-    SlowClient,
-    UnsupportedTopic,
     VersionMismatch,
 }
 
@@ -237,25 +232,19 @@ impl MetricsSnapshot {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueDepths {
-    pub events: usize,
     pub alerts: usize,
-    pub graph: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuePolicy {
-    pub events_capacity: usize,
     pub alerts_capacity: usize,
-    pub graph_capacity: usize,
     pub client_slow_timeout_ms: u64,
 }
 
 impl Default for QueuePolicy {
     fn default() -> Self {
         Self {
-            events_capacity: IPC_EVENTS_QUEUE,
             alerts_capacity: IPC_ALERTS_QUEUE,
-            graph_capacity: IPC_GRAPH_QUEUE,
             client_slow_timeout_ms: IPC_CLIENT_SLOW_TIMEOUT_MS,
         }
     }
@@ -269,7 +258,7 @@ pub struct VersionMismatch {
     pub received_schema_version: u32,
 }
 
-pub fn validate_versions(ipc_version: u32, schema_version: u32) -> IpcResult<()> {
+fn validate_versions(ipc_version: u32, schema_version: u32) -> IpcResult<()> {
     if ipc_version == IPC_VERSION && schema_version == SCHEMA_VERSION {
         return Ok(());
     }

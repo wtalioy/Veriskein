@@ -41,19 +41,11 @@ pub fn encode_ndjson(frame: &IpcFrame) -> IpcResult<String> {
     Ok(line)
 }
 
-pub fn encode_ndjson_frame(frame: &IpcFrame) -> IpcResult<String> {
-    encode_ndjson(frame)
-}
-
 pub fn decode_ndjson(line: &str) -> IpcResult<IpcFrame> {
     let line = normalize_ndjson_line(line)?;
     let frame: IpcFrame = serde_json::from_str(line)?;
     frame.validate_versions()?;
     Ok(frame)
-}
-
-pub fn decode_ndjson_frame(line: &str) -> IpcResult<IpcFrame> {
-    decode_ndjson(line)
 }
 
 fn normalize_ndjson_line(line: &str) -> IpcResult<&str> {

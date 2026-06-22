@@ -7,6 +7,7 @@ mod process;
 
 use serde::Serialize;
 use veriskein_proto::EventKind;
+use veriskein_retention::BoundedMap;
 
 use crate::config::{SensitiveConfig, WorkspaceRef};
 use path::PathCacheKey;
@@ -143,7 +144,7 @@ pub struct Normalizer {
     processes: BTreeMap<u32, ProcessState>,
     process_order: VecDeque<u32>,
     expiring: BTreeMap<u32, ProcessState>,
-    path_cache: BTreeMap<PathCacheKey, PathResolution>,
+    path_cache: BoundedMap<PathCacheKey, PathResolution>,
     evicted_process_detail_total: u64,
 }
 
@@ -155,7 +156,7 @@ impl Normalizer {
             processes: BTreeMap::new(),
             process_order: VecDeque::new(),
             expiring: BTreeMap::new(),
-            path_cache: BTreeMap::new(),
+            path_cache: BoundedMap::new(MAX_PATH_CACHE_ENTRIES),
             evicted_process_detail_total: 0,
         };
         // Bootstrapping procfs gives the daemon enough state to reason about

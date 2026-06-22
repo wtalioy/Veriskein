@@ -32,11 +32,11 @@ impl Normalizer {
         let resolution = if let Some(cached) = self.path_cache.get(&cache_key) {
             let mut cached = cached.clone();
             cached.freshness_ns = ts_ns;
+            self.path_cache.insert(cache_key.clone(), cached.clone());
             cached
         } else {
             let resolved = self.compute_resolution(&base, &lexical, ts_ns);
             self.path_cache.insert(cache_key, resolved.clone());
-            self.prune_path_cache();
             resolved
         };
         self.path_context_from_resolution(resolution)
@@ -116,20 +116,6 @@ impl Normalizer {
             sensitive_rule: sensitive.map(|rule| rule.glob.clone()),
             sensitive_severity: sensitive.map(|rule| rule.severity.clone()),
             resolution,
-        }
-    }
-
-    fn prune_path_cache(&mut self) {
-        while self.path_cache.len() > super::MAX_PATH_CACHE_ENTRIES {
-            let Some(key) = self
-                .path_cache
-                .iter()
-                .min_by_key(|(_, resolution)| resolution.freshness_ns)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            self.path_cache.remove(&key);
         }
     }
 }

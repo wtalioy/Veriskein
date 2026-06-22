@@ -13,49 +13,23 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 use veriskein_collector::CollectorCounters;
+use veriskein_ipc::IpcError;
+use veriskein_ipc::QueuePolicy;
 use veriskein_ipc::{
     AlertFrame, ErrorCode, ErrorFrame, HelloFrame, IpcFrame, MetricsFrame, MetricsSnapshot, Topic,
-    WelcomeFrame, decode_ndjson_frame, encode_ndjson_frame,
+    WelcomeFrame, decode_ndjson, encode_ndjson,
 };
 use veriskein_proto::EventId;
-
-use veriskein_ipc::QueuePolicy;
 
 const SERVER_NAME: &str = "veriskein-daemon";
 const OWNER_ONLY_SOCKET_MODE: u32 = 0o600;
 const PEERCRED_FILTERED_SOCKET_MODE: u32 = 0o666;
 const MAX_IPC_FRAME_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct IpcSettings {
     pub allow_uids: Vec<u32>,
-    pub alerts_capacity: usize,
-    pub events_capacity: usize,
-    pub graph_capacity: usize,
-    pub client_slow_timeout_ms: u64,
-}
-
-impl Default for IpcSettings {
-    fn default() -> Self {
-        Self {
-            allow_uids: Vec::new(),
-            alerts_capacity: veriskein_ipc::IPC_ALERTS_QUEUE,
-            events_capacity: veriskein_ipc::IPC_EVENTS_QUEUE,
-            graph_capacity: veriskein_ipc::IPC_GRAPH_QUEUE,
-            client_slow_timeout_ms: veriskein_ipc::IPC_CLIENT_SLOW_TIMEOUT_MS,
-        }
-    }
-}
-
-impl IpcSettings {
-    fn queue_policy(&self) -> QueuePolicy {
-        QueuePolicy {
-            events_capacity: self.events_capacity,
-            alerts_capacity: self.alerts_capacity,
-            graph_capacity: self.graph_capacity,
-            client_slow_timeout_ms: self.client_slow_timeout_ms,
-        }
-    }
+    pub queue_policy: QueuePolicy,
 }
 
 pub(crate) struct IpcServer {
@@ -79,7 +53,7 @@ impl IpcServer {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(socket_mode))
             .with_context(|| format!("chmod IPC socket {}", path.display()))?;
 
-        let (alerts_tx, _) = broadcast::channel(settings.alerts_capacity);
+        let (alerts_tx, _) = broadcast::channel(settings.queue_policy.alerts_capacity);
         let (metrics_tx, metrics_rx) = watch::channel(IpcFrame::Metrics(MetricsFrame::new(
             MetricsSnapshot::new(now_ns()),
         )));
@@ -173,6 +147,7 @@ async fn serve_client(
     run_id: &str,
 ) -> Result<()> {
     ensure_peer_allowed(&stream, &settings.allow_uids)?;
+    let slow_timeout_ms = settings.queue_policy.client_slow_timeout_ms;
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut hello = Vec::new();
@@ -181,7 +156,7 @@ async fn serve_client(
             &mut write_half,
             ErrorCode::DecodeError,
             err.to_string(),
-            settings.client_slow_timeout_ms,
+            slow_timeout_ms,
         )
         .await?;
         return Ok(());
@@ -190,14 +165,30 @@ async fn serve_client(
         return Ok(());
     }
     let hello = String::from_utf8(hello).context("decode IPC hello as utf-8")?;
-    let subscriptions = match decode_ndjson_frame(&hello) {
+    let subscriptions = match decode_ndjson(&hello) {
         Ok(IpcFrame::Hello(frame)) => accepted_topics(&frame),
         Ok(_) => {
             write_error(
                 &mut write_half,
                 ErrorCode::DecodeError,
                 "first IPC frame must be hello",
-                settings.client_slow_timeout_ms,
+                slow_timeout_ms,
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(IpcError::VersionMismatch {
+            received_ipc_version,
+            received_schema_version,
+            ..
+        }) => {
+            write_frame(
+                &mut write_half,
+                &IpcFrame::Error(ErrorFrame::version_mismatch(
+                    received_ipc_version,
+                    received_schema_version,
+                )),
+                slow_timeout_ms,
             )
             .await?;
             return Ok(());
@@ -205,9 +196,9 @@ async fn serve_client(
         Err(err) => {
             write_error(
                 &mut write_half,
-                ErrorCode::VersionMismatch,
+                ErrorCode::DecodeError,
                 err.to_string(),
-                settings.client_slow_timeout_ms,
+                slow_timeout_ms,
             )
             .await?;
             return Ok(());
@@ -219,16 +210,16 @@ async fn serve_client(
         &IpcFrame::Welcome(WelcomeFrame {
             run_id: run_id.to_string(),
             accepted_topics: subscriptions.clone(),
-            queue_policy: settings.queue_policy(),
+            queue_policy: settings.queue_policy.clone(),
             ..WelcomeFrame::new(SERVER_NAME)
         }),
-        settings.client_slow_timeout_ms,
+        slow_timeout_ms,
     )
     .await?;
 
     if subscriptions.contains(&Topic::Metrics) {
         let frame = metrics_rx.borrow().clone();
-        write_frame(&mut write_half, &frame, settings.client_slow_timeout_ms).await?;
+        write_frame(&mut write_half, &frame, slow_timeout_ms).await?;
     }
 
     let mut client_line = Vec::new();
@@ -236,13 +227,13 @@ async fn serve_client(
         tokio::select! {
             alert = alerts_rx.recv(), if subscriptions.contains(&Topic::Alert) => {
                 match alert {
-                    Ok(frame) => write_frame(&mut write_half, &frame, settings.client_slow_timeout_ms).await?,
+                    Ok(frame) => write_frame(&mut write_half, &frame, slow_timeout_ms).await?,
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         write_error(
                             &mut write_half,
                             ErrorCode::QueueOverflow,
                             "alert client lagged",
-                            settings.client_slow_timeout_ms,
+                            slow_timeout_ms,
                         ).await?;
                         return Ok(());
                     }
@@ -254,7 +245,7 @@ async fn serve_client(
                     return Ok(());
                 }
                 let frame = metrics_rx.borrow().clone();
-                write_frame(&mut write_half, &frame, settings.client_slow_timeout_ms).await?;
+                write_frame(&mut write_half, &frame, slow_timeout_ms).await?;
             }
             line = read_bounded_line(&mut reader, &mut client_line, MAX_IPC_FRAME_BYTES) => {
                 match line {
@@ -265,7 +256,7 @@ async fn serve_client(
                             &mut write_half,
                             ErrorCode::DecodeError,
                             err.to_string(),
-                            settings.client_slow_timeout_ms,
+                            slow_timeout_ms,
                         ).await?;
                         return Ok(());
                     }
@@ -334,7 +325,7 @@ async fn write_frame<W>(stream: &mut W, frame: &IpcFrame, timeout_ms: u64) -> Re
 where
     W: AsyncWrite + Unpin,
 {
-    let line = encode_ndjson_frame(frame).context("encode IPC frame")?;
+    let line = encode_ndjson(frame).context("encode IPC frame")?;
     timeout(
         Duration::from_millis(timeout_ms),
         stream.write_all(line.as_bytes()),

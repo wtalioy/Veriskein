@@ -4,15 +4,26 @@ use veriskein_correlator::{PromptEvidence, PromptEvidenceKind};
 use veriskein_graph::Attribution;
 use veriskein_normalizer::{NormalizedData, NormalizedEvent};
 use veriskein_proto::defaults;
+use veriskein_retention::BoundedMap;
 
-use crate::finding::{Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType};
+use crate::finding::{
+    Finding, FindingEvidence, FindingObjects, FindingParts, FindingType, build_finding,
+};
 use crate::signals::DetectorSignal;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct DeadloopDetector {
-    sessions: BTreeMap<String, DeadloopSession>,
-    session_order: VecDeque<(String, u64)>,
+    sessions: BoundedMap<String, DeadloopSession>,
     cooldown_until_ns: BTreeMap<String, u64>,
+}
+
+impl Default for DeadloopDetector {
+    fn default() -> Self {
+        Self {
+            sessions: BoundedMap::new(defaults::MAX_DEADLOOP_SESSIONS.max(1)),
+            cooldown_until_ns: BTreeMap::new(),
+        }
+    }
 }
 
 impl DeadloopDetector {
@@ -67,13 +78,10 @@ impl DeadloopDetector {
             },
         };
 
-        {
-            let session = self.sessions.entry(session_id.clone()).or_default();
-            session.push(loop_event);
-            session.prune_before(event.ts_ns, window_ns);
-        }
-        self.touch_session(&session_id, event.ts_ns);
-        self.prune_capacity();
+        let mut session = self.sessions.remove(&session_id).unwrap_or_default();
+        session.push(loop_event);
+        session.prune_before(event.ts_ns, window_ns);
+        self.insert_session(session_id.clone(), session);
 
         if self
             .cooldown_until_ns
@@ -101,49 +109,28 @@ impl DeadloopDetector {
     }
 
     pub(crate) fn prune_expired(&mut self, now_ns: u64, window_ns: u64) {
-        while let Some((session_id, ts_ns)) = self.session_order.front().cloned() {
-            let Some(session) = self.sessions.get(&session_id) else {
-                self.session_order.pop_front();
-                continue;
-            };
-            if session.last_ts_ns != ts_ns {
-                self.session_order.pop_front();
-                continue;
-            }
-            if !session.is_expired(now_ns, window_ns) {
-                break;
-            }
-            self.session_order.pop_front();
+        let expired = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.is_expired(now_ns, window_ns))
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        for session_id in expired {
             self.sessions.remove(&session_id);
             self.cooldown_until_ns.remove(&session_id);
         }
         self.cooldown_until_ns.retain(|_, until| *until > now_ns);
     }
 
-    fn touch_session(&mut self, session_id: &str, ts_ns: u64) {
-        self.session_order
-            .push_back((session_id.to_string(), ts_ns));
-    }
-
-    fn prune_capacity(&mut self) {
-        while self.sessions.len() > defaults::MAX_DEADLOOP_SESSIONS.max(1) {
-            let Some((session_id, ts_ns)) = self.session_order.pop_front() else {
-                break;
-            };
-            if self
-                .sessions
-                .get(&session_id)
-                .is_some_and(|session| session.last_ts_ns == ts_ns)
-            {
-                self.sessions.remove(&session_id);
-                self.cooldown_until_ns.remove(&session_id);
-            }
+    fn insert_session(&mut self, session_id: String, session: DeadloopSession) {
+        for (session_id, _) in self.sessions.insert(session_id, session) {
+            self.cooldown_until_ns.remove(&session_id);
         }
     }
 
     #[cfg(test)]
     pub(crate) fn tracked_session_count(&self) -> usize {
-        self.sessions.len()
+        self.sessions.iter().count()
     }
 
     #[cfg(test)]
@@ -191,7 +178,7 @@ struct PromptMatch {
     count: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct DeadloopSession {
     events: VecDeque<LoopEvent>,
     last_ts_ns: u64,
@@ -317,16 +304,13 @@ fn deadloop_finding(
     let mut ips = Vec::new();
     let mut ports = Vec::new();
     let mut evidence = Vec::new();
+    let mut has_connect = false;
+    let mut has_file = false;
     for entry in events {
         let matches_top_connect = core_match.connect.as_ref().is_some_and(|connect| {
             entry.ip.as_ref() == Some(&connect.ip) && entry.port == Some(connect.port)
         });
-        if entry.evidence_kind == "net_connect"
-            && matches_top_connect
-            && evidence
-                .iter()
-                .all(|e: &FindingEvidence| e.kind != "net_connect")
-        {
+        if entry.evidence_kind == "net_connect" && matches_top_connect && !has_connect {
             if let Some(ip) = &entry.ip {
                 ips.push(ip.clone());
             }
@@ -339,15 +323,13 @@ fn deadloop_finding(
                 entry.ip.clone(),
                 entry.port,
             ));
+            has_connect = true;
         }
         let matches_top_file = core_match
             .file
             .as_ref()
             .is_some_and(|file| entry.path.as_ref() == Some(&file.path));
-        if entry.evidence_kind == "file_access"
-            && matches_top_file
-            && evidence.iter().all(|e| e.kind != "file_access")
-        {
+        if entry.evidence_kind == "file_access" && matches_top_file && !has_file {
             if let Some(path) = &entry.path {
                 paths.push(path.clone());
             }
@@ -356,10 +338,9 @@ fn deadloop_finding(
                 entry.ingest_seq,
                 entry.path.clone(),
             ));
+            has_file = true;
         }
-        if evidence.iter().any(|e| e.kind == "net_connect")
-            && evidence.iter().any(|e| e.kind == "file_access")
-        {
+        if has_connect && has_file {
             break;
         }
     }
@@ -406,46 +387,42 @@ fn deadloop_finding(
         scores.insert("prompt_refs".to_string(), prompt_evidence.len() as f32);
     }
 
-    Finding {
-        finding_type: FindingType::SingleAgentDeadloop,
-        ts_ns: event.ts_ns,
-        pid: event.process.pid,
-        tid: event.process.tid,
-        session_id: session_id.to_string(),
-        agent_id: Some(binding.agent_id.hex()),
-        reason_code: "deadloop_core_no_progress".to_string(),
-        summary: format!(
-            "session stuck in a {}s loop: {} connects, {} repeated file accesses, {} repeated prompts",
-            defaults::DEADLOOP_WINDOW_S,
-            core_match
-                .connect
-                .as_ref()
-                .map(|connect| connect.count)
-                .unwrap_or(0),
-            core_match.file.as_ref().map(|file| file.count).unwrap_or(0),
-            core_match
-                .prompt
-                .as_ref()
-                .map(|prompt| prompt.count)
-                .unwrap_or(0)
-        ),
-        process_comm: event.process.comm.clone(),
-        process_binary: event.process.exe.clone(),
-        workspace: binding.workspace.root.display().to_string(),
-        objects: FindingObjects {
-            paths,
-            ips,
-            ports,
-            event_ids: evidence
-                .iter()
-                .map(|entry| entry.event_id.clone())
-                .collect(),
-            argv: event.process.argv.clone(),
-            ..FindingObjects::default()
-        },
-        evidence,
-        health: FindingHealth::full(),
-        component_scores: scores,
-        explanation: None,
-    }
+    build_finding(
+        event,
+        binding,
+        FindingParts::new(
+            FindingType::SingleAgentDeadloop,
+            event.ts_ns,
+            session_id,
+            "deadloop_core_no_progress",
+            format!(
+                "session stuck in a {}s loop: {} connects, {} repeated file accesses, {} repeated prompts",
+                defaults::DEADLOOP_WINDOW_S,
+                core_match
+                    .connect
+                    .as_ref()
+                    .map(|connect| connect.count)
+                    .unwrap_or(0),
+                core_match.file.as_ref().map(|file| file.count).unwrap_or(0),
+                core_match
+                    .prompt
+                    .as_ref()
+                    .map(|prompt| prompt.count)
+                    .unwrap_or(0)
+            ),
+            FindingObjects {
+                paths,
+                ips,
+                ports,
+                event_ids: evidence
+                    .iter()
+                    .map(|entry| entry.event_id.clone())
+                    .collect(),
+                argv: event.process.argv.clone(),
+                ..FindingObjects::default()
+            },
+            evidence,
+        )
+        .with_component_scores(scores),
+    )
 }

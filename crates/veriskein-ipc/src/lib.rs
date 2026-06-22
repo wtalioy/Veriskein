@@ -12,10 +12,7 @@ mod tests;
 
 pub use frame::{
     AlertFrame, DEFAULT_SOCKET_NAME, ErrorCode, ErrorFrame, HelloFrame, IPC_ALERTS_QUEUE,
-    IPC_CLIENT_SLOW_TIMEOUT_MS, IPC_EVENTS_QUEUE, IPC_GRAPH_QUEUE, IPC_VERSION, IpcFrame,
-    MetricsFrame, MetricsSnapshot, QueueDepths, QueuePolicy, SCHEMA_VERSION, Topic,
-    VersionMismatch, WelcomeFrame, default_socket_path, validate_versions,
+    IPC_CLIENT_SLOW_TIMEOUT_MS, IPC_VERSION, IpcFrame, MetricsFrame, MetricsSnapshot, QueueDepths,
+    QueuePolicy, SCHEMA_VERSION, Topic, VersionMismatch, WelcomeFrame, default_socket_path,
 };
-pub use ndjson::{
-    IpcError, IpcResult, decode_ndjson, decode_ndjson_frame, encode_ndjson, encode_ndjson_frame,
-};
+pub use ndjson::{IpcError, IpcResult, decode_ndjson, encode_ndjson};

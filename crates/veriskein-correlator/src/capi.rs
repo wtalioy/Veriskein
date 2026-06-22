@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 use veriskein_proto::{AgentId, SessionId, VisibilityState, defaults};
+use veriskein_retention::BoundedMap;
 
 use crate::{
     ArtifactInput, ArtifactStore, ChainInput, ChainRiskKind, CrossSessionMatchCandidate,
@@ -101,6 +102,13 @@ struct PendingRead {
     read_ts_ns: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PendingReadToken {
+    session_id: SessionId,
+    artifact_id: veriskein_proto::ArtifactId,
+    read_ts_ns: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct CandidateEntry {
     candidate: CrossSessionMatchCandidate,
@@ -122,10 +130,17 @@ struct TemplateEntry {
     keyword_bearing: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TemplateSuppressor {
-    entries: BTreeMap<TemplateKey, TemplateEntry>,
-    order: VecDeque<TemplateKey>,
+    entries: BoundedMap<TemplateKey, TemplateEntry>,
+}
+
+impl Default for TemplateSuppressor {
+    fn default() -> Self {
+        Self {
+            entries: BoundedMap::new(defaults::MAX_TEMPLATE_IGNORE),
+        }
+    }
 }
 
 impl TemplateSuppressor {
@@ -141,10 +156,8 @@ impl TemplateSuppressor {
             source_type: artifact.source_type,
             norm_hash: artifact.signature.hash_norm,
         };
-        self.order.retain(|existing| existing != &key);
-        self.order.push_back(key.clone());
         let normalized = &artifact.signature.normalized;
-        let entry = self.entries.entry(key).or_insert_with(|| TemplateEntry {
+        let mut entry = self.entries.remove(&key).unwrap_or_else(|| TemplateEntry {
             sessions: BTreeSet::new(),
             last_seen_ns: ts_ns,
             low_entropy: is_suppressible_template_shape(normalized),
@@ -155,6 +168,7 @@ impl TemplateSuppressor {
         entry.last_seen_ns = ts_ns;
         entry.low_entropy &= is_suppressible_template_shape(normalized);
         entry.keyword_bearing |= hits_keyword(normalized, keywords);
+        self.entries.insert(key, entry);
         self.prune(ts_ns);
     }
 
@@ -173,31 +187,38 @@ impl TemplateSuppressor {
         let ttl_ns = defaults::secs_to_ns(3600);
         self.entries
             .retain(|_, entry| entry.last_seen_ns.saturating_add(ttl_ns) >= now_ns);
-        self.order.retain(|key| self.entries.contains_key(key));
-        while self.entries.len() > defaults::MAX_TEMPLATE_IGNORE {
-            let Some(key) = self.order.pop_front() else {
-                break;
-            };
-            self.entries.remove(&key);
-        }
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CapiState {
     artifacts: ArtifactStore,
-    latest_file_lineage: BTreeMap<String, FileLineage>,
-    latest_file_lineage_order: VecDeque<String>,
+    latest_file_lineage: BoundedMap<String, FileLineage>,
     pending_downstream_reads: BTreeMap<SessionId, VecDeque<PendingRead>>,
-    pending_downstream_read_order: VecDeque<SessionId>,
+    pending_downstream_read_order: VecDeque<PendingReadToken>,
     pending_downstream_read_total: usize,
-    candidates: BTreeMap<CandidateKey, CandidateEntry>,
-    candidate_order: VecDeque<CandidateKey>,
-    emitted_chains: BTreeSet<veriskein_proto::ChainId>,
-    emitted_chain_order: VecDeque<veriskein_proto::ChainId>,
+    candidates: BoundedMap<CandidateKey, CandidateEntry>,
+    emitted_chains: BoundedMap<veriskein_proto::ChainId, ()>,
     template_suppressor: TemplateSuppressor,
     keywords: InjectionKeywordConfig,
     evicted_detail_total: u64,
+}
+
+impl Default for CapiState {
+    fn default() -> Self {
+        Self {
+            artifacts: ArtifactStore::default(),
+            latest_file_lineage: BoundedMap::new(defaults::MAX_ARTIFACTS),
+            pending_downstream_reads: BTreeMap::new(),
+            pending_downstream_read_order: VecDeque::new(),
+            pending_downstream_read_total: 0,
+            candidates: BoundedMap::new(defaults::MAX_ARTIFACTS),
+            emitted_chains: BoundedMap::new(defaults::MAX_EVENT_INDEX),
+            template_suppressor: TemplateSuppressor::default(),
+            keywords: InjectionKeywordConfig::default(),
+            evicted_detail_total: 0,
+        }
+    }
 }
 
 impl CapiState {
@@ -216,20 +237,20 @@ impl CapiState {
             return;
         }
         if input.is_write {
-            self.latest_file_lineage_order
-                .retain(|path| path != &input.path);
-            self.latest_file_lineage_order.push_back(input.path.clone());
-            self.latest_file_lineage.insert(
-                input.path.clone(),
-                FileLineage {
-                    session_id: input.session_id,
-                    agent_id: input.agent_id,
-                    pid: input.pid,
-                    ts_ns: input.ts_ns,
-                    excerpt: input.inline_excerpt.clone(),
-                },
+            self.evicted_detail_total = self.evicted_detail_total.saturating_add(
+                self.latest_file_lineage
+                    .insert(
+                        input.path.clone(),
+                        FileLineage {
+                            session_id: input.session_id,
+                            agent_id: input.agent_id,
+                            pid: input.pid,
+                            ts_ns: input.ts_ns,
+                            excerpt: input.inline_excerpt.clone(),
+                        },
+                    )
+                    .len() as u64,
             );
-            self.enforce_bounds();
         }
         if !input.is_read {
             return;
@@ -271,7 +292,11 @@ impl CapiState {
                 read_ts_ns: input.ts_ns,
             });
         self.pending_downstream_read_order
-            .push_back(input.session_id);
+            .push_back(PendingReadToken {
+                session_id: input.session_id,
+                artifact_id,
+                read_ts_ns: input.ts_ns,
+            });
         self.pending_downstream_read_total = self.pending_downstream_read_total.saturating_add(1);
         self.enforce_bounds();
     }
@@ -315,17 +340,18 @@ impl CapiState {
                 artifact_id: candidate.artifact_id,
                 prompt_id: candidate.prompt_id,
             };
-            self.candidate_order.retain(|existing| existing != &key);
-            self.candidate_order.push_back(key.clone());
-            self.candidates.insert(
-                key,
-                CandidateEntry {
-                    candidate,
-                    prompt_ts_ns: prompt.ts_start,
-                },
+            self.evicted_detail_total = self.evicted_detail_total.saturating_add(
+                self.candidates
+                    .insert(
+                        key,
+                        CandidateEntry {
+                            candidate,
+                            prompt_ts_ns: prompt.ts_start,
+                        },
+                    )
+                    .len() as u64,
             );
         }
-        self.enforce_bounds();
     }
 
     pub fn chains_for_risky_event(
@@ -374,8 +400,10 @@ impl CapiState {
             }) else {
                 continue;
             };
-            if self.emitted_chains.insert(chain.id) {
-                self.emitted_chain_order.push_back(chain.id);
+            if !self.emitted_chains.contains_key(&chain.id) {
+                self.evicted_detail_total = self
+                    .evicted_detail_total
+                    .saturating_add(self.emitted_chains.insert(chain.id, ()).len() as u64);
                 out.push(chain);
             }
         }
@@ -401,60 +429,55 @@ impl CapiState {
         }
         self.pending_downstream_reads
             .retain(|_, reads| !reads.is_empty());
+        let live_reads = self.pending_read_tokens();
         self.pending_downstream_read_order
-            .retain(|session_id| self.pending_downstream_reads.contains_key(session_id));
+            .retain(|token| live_reads.contains(token));
         self.candidates
             .retain(|_, entry| entry.prompt_ts_ns.saturating_add(max_age_ns) >= now_ns);
         self.enforce_bounds();
     }
 
     fn enforce_bounds(&mut self) {
-        while self.latest_file_lineage.len() > veriskein_proto::defaults::MAX_ARTIFACTS {
-            let Some(path) = self.latest_file_lineage_order.pop_front() else {
-                break;
-            };
-            if self.latest_file_lineage.remove(&path).is_some() {
-                self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
-            }
-        }
         while self.pending_downstream_read_total > veriskein_proto::defaults::MAX_ARTIFACTS {
-            let Some(session_id) = self.pending_downstream_read_order.pop_front() else {
+            let Some(token) = self.pending_downstream_read_order.pop_front() else {
                 break;
             };
-            let Some(reads) = self.pending_downstream_reads.get_mut(&session_id) else {
+            let Some(reads) = self.pending_downstream_reads.get_mut(&token.session_id) else {
                 continue;
             };
-            if reads.pop_front().is_none() {
-                self.pending_downstream_reads.remove(&session_id);
+            let Some(index) = reads.iter().position(|read| {
+                read.artifact_id == token.artifact_id && read.read_ts_ns == token.read_ts_ns
+            }) else {
+                if reads.is_empty() {
+                    self.pending_downstream_reads.remove(&token.session_id);
+                }
                 continue;
-            }
+            };
+            reads.remove(index);
             self.pending_downstream_read_total =
                 self.pending_downstream_read_total.saturating_sub(1);
             self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
             if self
                 .pending_downstream_reads
-                .get(&session_id)
+                .get(&token.session_id)
                 .is_some_and(VecDeque::is_empty)
             {
-                self.pending_downstream_reads.remove(&session_id);
+                self.pending_downstream_reads.remove(&token.session_id);
             }
         }
-        while self.candidates.len() > veriskein_proto::defaults::MAX_ARTIFACTS {
-            let Some(key) = self.candidate_order.pop_front() else {
-                break;
-            };
-            if self.candidates.remove(&key).is_some() {
-                self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
-            }
-        }
-        while self.emitted_chains.len() > veriskein_proto::defaults::MAX_EVENT_INDEX {
-            let Some(chain_id) = self.emitted_chain_order.pop_front() else {
-                break;
-            };
-            if self.emitted_chains.remove(&chain_id) {
-                self.evicted_detail_total = self.evicted_detail_total.saturating_add(1);
-            }
-        }
+    }
+
+    fn pending_read_tokens(&self) -> BTreeSet<PendingReadToken> {
+        self.pending_downstream_reads
+            .iter()
+            .flat_map(|(session_id, reads)| {
+                reads.iter().map(|read| PendingReadToken {
+                    session_id: *session_id,
+                    artifact_id: read.artifact_id,
+                    read_ts_ns: read.read_ts_ns,
+                })
+            })
+            .collect()
     }
 }
 

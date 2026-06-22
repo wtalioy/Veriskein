@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 use veriskein_proto::{AgentId, ContentChannel, PromptId, SessionId, VisibilityState, defaults};
+use veriskein_retention::BoundedMap;
 
 use crate::matching::{ContentSignature, hex16};
 
@@ -92,12 +93,21 @@ impl PromptEvidenceKind {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PromptStore {
-    prompts: BTreeMap<PromptId, PromptObject>,
+    prompts: BoundedMap<PromptId, PromptObject>,
     by_session: BTreeMap<SessionId, VecDeque<PromptId>>,
-    insertion_order: VecDeque<PromptId>,
     evicted_prompts_total: u64,
+}
+
+impl Default for PromptStore {
+    fn default() -> Self {
+        Self {
+            prompts: BoundedMap::new(defaults::MAX_PROMPTS),
+            by_session: BTreeMap::new(),
+            evicted_prompts_total: 0,
+        }
+    }
 }
 
 impl PromptStore {
@@ -133,11 +143,13 @@ impl PromptStore {
             degraded: input.degraded,
         };
         let id = prompt.id;
-        self.prompts.insert(id, prompt);
-        self.by_session.entry(session_id).or_default().push_back(id);
-        self.insertion_order.push_back(id);
+        let evicted = self.prompts.insert(id, prompt);
+        let ids = self.by_session.entry(session_id).or_default();
+        if !ids.iter().any(|existing| existing == &id) {
+            ids.push_back(id);
+        }
+        self.remove_session_entries(evicted);
         self.evict_session(session_id, ts_end);
-        self.evict_global_if_needed();
         id
     }
 
@@ -290,25 +302,22 @@ impl PromptStore {
         }) {
             if let Some(id) = ids.pop_front() {
                 self.prompts.remove(&id);
-                self.insertion_order.retain(|existing| existing != &id);
                 self.evicted_prompts_total = self.evicted_prompts_total.saturating_add(1);
             }
         }
     }
 
-    fn evict_global_if_needed(&mut self) {
-        while self.prompts.len() > defaults::MAX_PROMPTS {
-            let Some(id) = self.insertion_order.pop_front() else {
-                break;
-            };
-            if self.prompts.remove(&id).is_some() {
-                for ids in self.by_session.values_mut() {
-                    ids.retain(|existing| existing != &id);
-                }
-                self.evicted_prompts_total = self.evicted_prompts_total.saturating_add(1);
+    fn remove_session_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = (PromptId, PromptObject)>,
+    ) {
+        for (id, prompt) in entries {
+            if let Some(session_ids) = self.by_session.get_mut(&prompt.session_id) {
+                session_ids.retain(|existing| existing != &id);
             }
-            self.by_session.retain(|_, ids| !ids.is_empty());
+            self.evicted_prompts_total = self.evicted_prompts_total.saturating_add(1);
         }
+        self.by_session.retain(|_, ids| !ids.is_empty());
     }
 }
 

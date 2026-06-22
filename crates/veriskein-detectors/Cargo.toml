@@ -15,6 +15,7 @@ veriskein-correlator = { path = "../veriskein-correlator" }
 veriskein-graph = { path = "../veriskein-graph" }
 veriskein-normalizer = { path = "../veriskein-normalizer" }
 veriskein-proto = { path = "../veriskein-proto" }
+veriskein-retention = { path = "../veriskein-retention" }
 
 [lints]
 workspace = true

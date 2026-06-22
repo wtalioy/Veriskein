@@ -5,7 +5,8 @@ use veriskein_graph::Attribution;
 use veriskein_normalizer::NormalizedEvent;
 
 use crate::finding::{
-    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
+    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingParts, FindingType,
+    PromptEvidenceState, build_finding,
 };
 
 pub fn detect_cross_agent_prompt_injection(
@@ -16,12 +17,9 @@ pub fn detect_cross_agent_prompt_injection(
     if chain.root_session == chain.downstream_session {
         return None;
     }
-    if chain.prompt_ids.is_empty()
-        || chain.artifact_ids.is_empty()
-        || chain.risky_event_ids.is_empty()
-    {
-        return None;
-    }
+    let prompt_id = chain.prompt_ids.first()?;
+    let artifact_id = chain.artifact_ids.first()?;
+    let risky_event_id = chain.risky_event_ids.first()?;
     if chain.causal_score < 0.55 {
         return None;
     }
@@ -44,77 +42,73 @@ pub fn detect_cross_agent_prompt_injection(
     health.visibility_state = chain.visibility_state;
     health.prompt_evidence_state = PromptEvidenceState::Available;
 
-    Some(Finding {
-        finding_type: FindingType::CrossAgentPromptInjection,
-        ts_ns: chain.ts_ns,
-        pid: event.process.pid,
-        tid: event.process.tid,
-        session_id: chain.downstream_session.hex(),
-        agent_id: Some(binding.agent_id.hex()),
-        reason_code: reason_code(chain.match_tier).to_string(),
-        summary: format!(
-            "cross-session prompt injection chain {} matched upstream artifact to downstream risky action",
-            &chain_id[..8]
-        ),
-        process_comm: event.process.comm.clone(),
-        process_binary: event.process.exe.clone(),
-        workspace: binding.workspace.root.display().to_string(),
-        objects: FindingObjects {
-            paths: Vec::new(),
-            ips: Vec::new(),
-            ports: Vec::new(),
-            prompt_ids,
-            artifact_ids,
-            event_ids: chain.risky_event_ids.clone(),
-            chain_id: Some(chain_id.clone()),
-            workspace_id: Some(binding.workspace.id.clone()),
-            root_session_id: Some(chain.root_session.hex()),
-            downstream_session_id: Some(chain.downstream_session.hex()),
-            argv: event.process.argv.clone(),
-        },
-        evidence: vec![
-            FindingEvidence::chain_ref(
-                "excerpt_match",
-                chain_id.clone(),
-                Some(chain.match_score),
-                Some(chain.redacted_artifact_excerpt.clone()),
-                Some(chain.redacted_prompt_excerpt.clone()),
-                Some(chain.match_tier.as_str().to_string()),
+    Some(build_finding(
+        event,
+        binding,
+        FindingParts::new(
+            FindingType::CrossAgentPromptInjection,
+            chain.ts_ns,
+            chain.downstream_session.hex(),
+            reason_code(chain.match_tier),
+            format!(
+                "cross-session prompt injection chain {} matched upstream artifact to downstream risky action",
+                &chain_id[..8]
             ),
-            FindingEvidence::chain_ref(
-                "artifact_ref",
-                chain.artifact_ids[0].hex(),
-                None,
-                None,
-                None,
-                Some("workspace_file_lineage".to_string()),
-            ),
-            FindingEvidence::chain_ref(
-                "prompt_ref",
-                chain.prompt_ids[0].hex(),
-                None,
-                None,
-                None,
-                Some("downstream_prompt".to_string()),
-            ),
-            FindingEvidence {
-                kind: "syscall".to_string(),
-                event_id: chain.risky_event_ids[0].clone(),
-                ingest_seq: event.ingest_seq,
-                path: None,
-                ip: None,
-                port: None,
-                score: None,
-                src: None,
-                dst: None,
-                op: Some(event.kind.as_str().to_string()),
-                note: Some("risky_action_after_prompt".to_string()),
+            FindingObjects {
+                prompt_ids,
+                artifact_ids,
+                event_ids: chain.risky_event_ids.clone(),
+                chain_id: Some(chain_id.clone()),
+                workspace_id: Some(binding.workspace.id.clone()),
+                root_session_id: Some(chain.root_session.hex()),
+                downstream_session_id: Some(chain.downstream_session.hex()),
+                argv: event.process.argv.clone(),
+                ..FindingObjects::default()
             },
-        ],
-        health,
-        component_scores,
-        explanation: Some(chain.explanation.clone()),
-    })
+            vec![
+                FindingEvidence::chain_ref(
+                    "excerpt_match",
+                    chain_id.clone(),
+                    Some(chain.match_score),
+                    Some(chain.redacted_artifact_excerpt.clone()),
+                    Some(chain.redacted_prompt_excerpt.clone()),
+                    Some(chain.match_tier.as_str().to_string()),
+                ),
+                FindingEvidence::chain_ref(
+                    "artifact_ref",
+                    artifact_id.hex(),
+                    None,
+                    None,
+                    None,
+                    Some("workspace_file_lineage".to_string()),
+                ),
+                FindingEvidence::chain_ref(
+                    "prompt_ref",
+                    prompt_id.hex(),
+                    None,
+                    None,
+                    None,
+                    Some("downstream_prompt".to_string()),
+                ),
+                FindingEvidence {
+                    kind: "syscall".to_string(),
+                    event_id: risky_event_id.clone(),
+                    ingest_seq: event.ingest_seq,
+                    path: None,
+                    ip: None,
+                    port: None,
+                    score: None,
+                    src: None,
+                    dst: None,
+                    op: Some(event.kind.as_str().to_string()),
+                    note: Some("risky_action_after_prompt".to_string()),
+                },
+            ],
+        )
+        .with_health(health)
+        .with_component_scores(component_scores)
+        .with_explanation(chain.explanation.clone()),
+    ))
 }
 
 fn reason_code(tier: MatchTier) -> &'static str {

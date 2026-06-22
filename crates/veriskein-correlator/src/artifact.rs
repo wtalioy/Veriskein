@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use serde::Serialize;
 use veriskein_proto::{AgentId, ArtifactId, SessionId, VisibilityState, defaults};
+use veriskein_retention::BoundedMap;
 
 use crate::matching::{ContentSignature, hex16};
 use crate::{RedactionMode, redact_excerpt};
@@ -52,10 +53,19 @@ pub struct SourceArtifact {
     pub redaction: RedactionMode,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ArtifactStore {
-    artifacts: BTreeMap<ArtifactId, SourceArtifact>,
+    artifacts: BoundedMap<ArtifactId, SourceArtifact>,
     by_locator: BTreeMap<SourceLocator, VecDeque<ArtifactId>>,
+}
+
+impl Default for ArtifactStore {
+    fn default() -> Self {
+        Self {
+            artifacts: BoundedMap::new(defaults::MAX_ARTIFACTS),
+            by_locator: BTreeMap::new(),
+        }
+    }
 }
 
 impl ArtifactStore {
@@ -85,12 +95,12 @@ impl ArtifactStore {
             visibility_state: input.visibility_state,
             redaction,
         };
-        self.artifacts.insert(id, artifact);
+        let evicted = self.artifacts.insert(id, artifact);
         let ids = self.by_locator.entry(input.source_locator).or_default();
         if !ids.iter().any(|existing| existing == &id) {
             ids.push_back(id);
         }
-        self.evict_if_needed();
+        self.remove_locator_entries(evicted);
         id
     }
 
@@ -113,16 +123,16 @@ impl ArtifactStore {
             .filter_map(|id| self.artifacts.get(id))
     }
 
-    fn evict_if_needed(&mut self) {
-        while self.artifacts.len() > defaults::MAX_ARTIFACTS {
-            let Some(id) = self.artifacts.keys().next().copied() else {
-                break;
-            };
-            self.artifacts.remove(&id);
-            for ids in self.by_locator.values_mut() {
-                ids.retain(|existing| existing != &id);
+    fn remove_locator_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = (ArtifactId, SourceArtifact)>,
+    ) {
+        for (id, artifact) in entries {
+            if let Some(locator_ids) = self.by_locator.get_mut(&artifact.source_locator) {
+                locator_ids.retain(|existing| existing != &id);
             }
         }
+        self.by_locator.retain(|_, ids| !ids.is_empty());
     }
 }
 

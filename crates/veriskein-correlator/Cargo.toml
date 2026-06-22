@@ -16,6 +16,7 @@ serde.workspace = true
 toml.workspace = true
 unicode-normalization.workspace = true
 veriskein-proto = { path = "../veriskein-proto" }
+veriskein-retention = { path = "../veriskein-retention" }
 
 [lints]
 workspace = true
