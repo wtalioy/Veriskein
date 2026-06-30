@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::process::Output;
 use std::time::Instant;
@@ -154,11 +154,7 @@ fn run_measurement(
     require_reported: bool,
 ) -> Result<PerfMeasurement> {
     let start = Instant::now();
-    let output = ProcessCommand::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .with_context(|| format!("run {mode} workload"))?;
+    let (output, time_report) = run_timed_command(mode, command)?;
     if !output.status.success() {
         bail!("{mode} workload exited with {}", output.status);
     }
@@ -171,10 +167,41 @@ fn run_measurement(
     }
     if require_reported {
         bail!(
-            "{mode} workload must emit PerfMeasurement JSON when non-duration budgets are configured"
+            "{mode} workload must emit PerfMeasurement JSON when drop or alert budgets are configured"
         );
     }
-    Ok(PerfMeasurement::new(wall_duration_ms, 0, 0, 0, 0))
+    Ok(time_report
+        .as_deref()
+        .and_then(|report| parse_time_report(report, wall_duration_ms))
+        .unwrap_or_else(|| PerfMeasurement::new(wall_duration_ms, 0, 0, 0, 0)))
+}
+
+fn run_timed_command(mode: PerfMode, command: &str) -> Result<(Output, Option<String>)> {
+    if Path::new("/usr/bin/time").exists() {
+        let path = std::env::temp_dir().join(format!(
+            "veriskein-perf-{}-{}-time.txt",
+            std::process::id(),
+            mode.as_str().replace(['+', '-'], "_")
+        ));
+        let output = ProcessCommand::new("/usr/bin/time")
+            .arg("-v")
+            .arg("-o")
+            .arg(&path)
+            .arg("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .with_context(|| format!("run {mode} workload"))?;
+        let report = fs::read_to_string(&path).ok();
+        let _ = fs::remove_file(path);
+        return Ok((output, report));
+    }
+    let output = ProcessCommand::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .with_context(|| format!("run {mode} workload"))?;
+    Ok((output, None))
 }
 
 fn parse_measurement_stdout(output: &Output) -> Result<Option<PerfMeasurement>> {
@@ -182,9 +209,34 @@ fn parse_measurement_stdout(output: &Output) -> Result<Option<PerfMeasurement>> 
     let Some(line) = stdout.lines().rev().find(|line| !line.trim().is_empty()) else {
         return Ok(None);
     };
+    if !line.trim_start().starts_with('{') {
+        return Ok(None);
+    }
     serde_json::from_str::<PerfMeasurement>(line.trim())
         .map(Some)
         .with_context(|| "parse workload PerfMeasurement JSON from stdout")
+}
+
+fn parse_time_report(report: &str, duration_ms: f64) -> Option<PerfMeasurement> {
+    let rss_kb = time_report_value(report, "Maximum resident set size (kbytes):")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let cpu_percent = time_report_value(report, "Percent of CPU this job got:")
+        .and_then(|value| value.trim_end_matches('%').parse::<f64>().ok());
+    if rss_kb == 0 && cpu_percent.is_none() {
+        return None;
+    }
+    let mut measurement = PerfMeasurement::new(duration_ms, 0, 0, 0, rss_kb.saturating_mul(1024));
+    if let Some(cpu_percent) = cpu_percent {
+        measurement = measurement.with_cpu_percent(cpu_percent);
+    }
+    Some(measurement)
+}
+
+fn time_report_value<'a>(report: &'a str, label: &str) -> Option<&'a str> {
+    report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(label).map(str::trim))
 }
 
 fn read_report(path: &PathBuf) -> Result<PerfReport> {
@@ -258,10 +310,7 @@ fn measure_budget_from_args(args: &MeasureArgs) -> Option<PerfBudget> {
 }
 
 fn measure_requires_reported_counters(args: &MeasureArgs) -> bool {
-    args.max_rss_overhead_percent.is_some()
-        || args.max_cpu_overhead_percent.is_some()
-        || args.max_drops_total.is_some()
-        || args.max_alerts_total.is_some()
+    args.max_drops_total.is_some() || args.max_alerts_total.is_some()
 }
 
 fn sample_report() -> PerfReport {
@@ -283,4 +332,55 @@ fn sample_report() -> PerfReport {
             PerfMeasurement::new(132.0, 10_000, 0, 3, 86 * 1024 * 1024).with_cpu_percent(13.7),
         ),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
+    use super::*;
+
+    fn output(stdout: &[u8]) -> Output {
+        Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parse_measurement_stdout_ignores_non_json_progress() {
+        assert!(
+            parse_measurement_stdout(&output(b"running\nok\n"))
+                .expect("parse")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_measurement_stdout_reads_last_json_line() {
+        let measurement = parse_measurement_stdout(&output(
+            br#"progress
+{"duration_ms":1.0,"events_total":2,"drops_total":0,"alerts_total":1,"rss_bytes":4096,"cpu_percent":null}
+"#,
+        ))
+        .expect("parse")
+        .expect("measurement");
+
+        assert_eq!(measurement.events_total, 2);
+        assert_eq!(measurement.alerts_total, 1);
+        assert_eq!(measurement.rss_bytes, 4096);
+    }
+
+    #[test]
+    fn parse_time_report_extracts_rss_and_cpu() {
+        let measurement = parse_time_report(
+            "Maximum resident set size (kbytes): 123\nPercent of CPU this job got: 45%\n",
+            10.0,
+        )
+        .expect("measurement");
+
+        assert_eq!(measurement.rss_bytes, 123 * 1024);
+        assert_eq!(measurement.cpu_percent, Some(45.0));
+    }
 }

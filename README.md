@@ -118,7 +118,7 @@ cargo run -p veriskein-perf -- measure \
 
 The report input can be either a full `PerfReport` JSON object or a map from mode names (`baseline`, `kernel-only`, `kernel+tls`, `full`) to measurements. Report and measure commands write `report.json` and `report.md`, and exit non-zero when configured budgets fail.
 
-`measure` records wall-clock duration by default. If RSS, CPU, drop, or alert budgets are configured, each workload command must print a `PerfMeasurement` JSON object on its last non-empty stdout line so those counters are measured rather than guessed.
+`measure` records wall-clock duration by default and uses `/usr/bin/time -v` for RSS/CPU when available. Workloads only need to print a `PerfMeasurement` JSON object on the last non-empty stdout line when drop or alert budgets are configured.
 
 ## Design Docs
 
