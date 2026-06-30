@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::VisibilityState;
+use crate::{ContentChannel, VisibilityState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromptEvidenceState {
@@ -49,6 +49,8 @@ pub struct FindingHealth {
     pub visibility_state: VisibilityState,
     pub prompt_evidence_state: PromptEvidenceState,
     pub degradation_sources: Vec<String>,
+    #[serde(default)]
+    pub capture_modes: Vec<ContentChannel>,
 }
 
 impl FindingHealth {
@@ -57,6 +59,7 @@ impl FindingHealth {
             visibility_state: VisibilityState::Full,
             prompt_evidence_state: PromptEvidenceState::Unavailable,
             degradation_sources: Vec::new(),
+            capture_modes: Vec::new(),
         }
     }
 
@@ -68,6 +71,12 @@ impl FindingHealth {
             .any(|existing| existing == &source)
         {
             self.degradation_sources.push(source);
+        }
+    }
+
+    pub fn push_capture_mode(&mut self, mode: ContentChannel) {
+        if !self.capture_modes.contains(&mode) {
+            self.capture_modes.push(mode);
         }
     }
 }

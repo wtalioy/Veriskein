@@ -6,7 +6,8 @@ use serde::Serialize;
 use serde_json::Value;
 use veriskein_proto::defaults;
 use veriskein_proto::{
-    Finding, FindingEvidence, FindingObjects, FindingType, PromptEvidenceState, VisibilityState,
+    ContentChannel, Finding, FindingEvidence, FindingObjects, FindingType, PromptEvidenceState,
+    VisibilityState,
 };
 
 pub const DEGRADATION_SOURCE_RINGBUF_DROP_RATE: &str = "ringbuf_drop_rate";
@@ -191,7 +192,7 @@ impl AlertRecord {
                     .collect(),
             },
             capture: AlertCapture {
-                mode: capture_mode(finding.health.prompt_evidence_state),
+                mode: capture_mode_for(finding),
                 redaction: redaction_mode(finding),
             },
             explanation: finding.explanation.clone(),
@@ -207,6 +208,25 @@ fn capture_mode(prompt_evidence_state: PromptEvidenceState) -> &'static str {
     match prompt_evidence_state {
         PromptEvidenceState::Available | PromptEvidenceState::Partial => "tls",
         PromptEvidenceState::Unavailable => "none",
+    }
+}
+
+fn capture_mode_for(finding: &Finding) -> &'static str {
+    if finding.health.capture_modes.is_empty() {
+        return match finding.finding_type {
+            FindingType::McpToolSpoofing => "mcp",
+            _ => capture_mode(finding.health.prompt_evidence_state),
+        };
+    }
+    let mut modes = finding.health.capture_modes.clone();
+    modes.sort_unstable();
+    modes.dedup();
+    match modes.as_slice() {
+        [ContentChannel::Tls] => "tls",
+        [ContentChannel::Stdio] => "stdio",
+        [ContentChannel::Pipe] => "pipe",
+        [ContentChannel::Mcp] => "mcp",
+        _ => "hybrid",
     }
 }
 
@@ -483,7 +503,7 @@ fn valid_finding(finding: &Finding) -> bool {
             finding
                 .evidence
                 .iter()
-                .any(|evidence| evidence.kind == "mcp_registry" && evidence.op.is_some())
+                .any(|evidence| evidence.kind == "heuristic" && evidence.op.is_some())
                 && !finding.objects.event_ids.is_empty()
         }
         FindingType::ExecObserved => finding.objects.paths.len() == 1,

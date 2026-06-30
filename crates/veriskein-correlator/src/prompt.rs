@@ -61,6 +61,7 @@ pub struct PromptRiskLink {
     pub prompt_ts_ns: u64,
     pub event_ts_ns: u64,
     pub visibility_state: VisibilityState,
+    pub capture_mode: ContentChannel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -68,6 +69,7 @@ pub struct RepeatedPromptSignal {
     pub prompt_id: PromptId,
     pub session_id: SessionId,
     pub normalized_count: u32,
+    pub capture_mode: ContentChannel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +77,7 @@ pub struct PromptEvidence {
     pub prompt_id: String,
     pub ingest_seq: u64,
     pub visibility_state: VisibilityState,
+    pub capture_mode: ContentChannel,
     pub kind: PromptEvidenceKind,
 }
 
@@ -202,6 +205,7 @@ impl PromptStore {
                 prompt_ts_ns: prompt.ts_end,
                 event_ts_ns,
                 visibility_state: prompt.visibility_state,
+                capture_mode: prompt.capture_mode,
             })
             .into_iter()
             .collect()
@@ -239,6 +243,11 @@ impl PromptStore {
                         prompt_id: latest[&hash],
                         session_id,
                         normalized_count: count,
+                        capture_mode: self
+                            .prompts
+                            .get(&latest[&hash])
+                            .map(|prompt| prompt.capture_mode)
+                            .unwrap_or(ContentChannel::Tls),
                     })
                 } else {
                     None
@@ -262,6 +271,7 @@ impl PromptStore {
                 prompt_id: link.prompt_id.hex(),
                 ingest_seq,
                 visibility_state: link.visibility_state,
+                capture_mode: link.capture_mode,
                 kind: PromptEvidenceKind::RiskLink {
                     risk_kind: link.risk_kind,
                 },
@@ -274,6 +284,7 @@ impl PromptStore {
                     prompt_id: signal.prompt_id.hex(),
                     ingest_seq,
                     visibility_state: VisibilityState::Full,
+                    capture_mode: signal.capture_mode,
                     kind: PromptEvidenceKind::RepeatedPrompt {
                         count: signal.normalized_count,
                     },

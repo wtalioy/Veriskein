@@ -15,9 +15,11 @@ impl<'de> Deserialize<'de> for MatchSpec {
         let mut parser = MatchParser::new(object);
 
         parser.parse_type()?;
-        parser.parse_string_in("severity_in", &["severity"], "severity_in")?;
+        parser.parse_string_eq("reason_code", &["reason_code"], "reason_code")?;
+        parser.parse_string_in("severity_in", &["severity"], &["severity"], "severity_in")?;
         parser.parse_string_in(
             "confidence_band_in",
+            &["confidence_band"],
             &["confidence_band"],
             "confidence_band_in",
         )?;
@@ -33,16 +35,42 @@ impl<'de> Deserialize<'de> for MatchSpec {
             &["objects", "ips"],
             "objects.ips_include",
         )?;
+        parser.parse_array_includes(
+            "objects.ports_include",
+            &["objects", "ports_include"],
+            &["objects", "ports"],
+            "objects.ports_include",
+        )?;
         parser.parse_evidence_kind()?;
         parser.parse_string_in(
             "fallback.mode_in",
             &["fallback", "mode_in"],
+            &["fallback", "mode"],
             "fallback.mode_in",
         )?;
         parser.parse_string_in(
             "fallback.visibility_in",
             &["fallback", "visibility_in"],
+            &["fallback", "visibility"],
             "fallback.visibility_in",
+        )?;
+        parser.parse_string_in(
+            "fallback.prompt_evidence_in",
+            &["fallback", "prompt_evidence_in"],
+            &["fallback", "prompt_evidence"],
+            "fallback.prompt_evidence_in",
+        )?;
+        parser.parse_string_in(
+            "capture.mode_in",
+            &["capture", "mode_in"],
+            &["capture", "mode"],
+            "capture.mode_in",
+        )?;
+        parser.parse_string_in(
+            "capture.redaction_in",
+            &["capture", "redaction_in"],
+            &["capture", "redaction"],
+            "capture.redaction_in",
         )?;
         parser.parse_objects_length_gte()?;
         parser.parse_present()?;
@@ -80,10 +108,31 @@ impl<'a> MatchParser<'a> {
         Ok(())
     }
 
+    fn parse_string_eq<E>(
+        &mut self,
+        dotted_key: &'static str,
+        actual_path: &'static [&'static str],
+        label: &'static str,
+    ) -> std::result::Result<(), E>
+    where
+        E: de::Error,
+    {
+        if let Some(value) = self.root.get(dotted_key) {
+            self.used.push(dotted_key.to_string());
+            self.criteria.push(Criterion::FieldIn {
+                path: actual_path,
+                label,
+                values: vec![expect_string::<E>(value, label)?],
+            });
+        }
+        Ok(())
+    }
+
     fn parse_string_in<E>(
         &mut self,
         dotted_key: &'static str,
         nested_path: &[&str],
+        actual_path: &'static [&'static str],
         label: &'static str,
     ) -> std::result::Result<(), E>
     where
@@ -92,13 +141,7 @@ impl<'a> MatchParser<'a> {
         if let Some((key, value)) = self.lookup(dotted_key, nested_path) {
             self.used.push(key);
             self.criteria.push(Criterion::FieldIn {
-                path: match label {
-                    "severity_in" => &["severity"],
-                    "confidence_band_in" => &["confidence_band"],
-                    "fallback.mode_in" => &["fallback", "mode"],
-                    "fallback.visibility_in" => &["fallback", "visibility"],
-                    _ => unreachable!("unknown string_in label"),
-                },
+                path: actual_path,
                 label,
                 values: expect_string_array::<E>(value, label)?,
             });
@@ -226,6 +269,55 @@ impl<'a> MatchParser<'a> {
                 label: "causal_score_gte".to_string(),
             });
         }
+        self.parse_component_score_gte::<E>()?;
+        Ok(())
+    }
+
+    fn parse_component_score_gte<E>(&mut self) -> std::result::Result<(), E>
+    where
+        E: de::Error,
+    {
+        for (key, value) in self.root {
+            let Some(score_name) = key
+                .strip_prefix("policy.component_scores.")
+                .and_then(|remaining| remaining.strip_suffix("_gte"))
+            else {
+                continue;
+            };
+            let label = key.clone();
+            self.used.push(label.clone());
+            self.criteria.push(Criterion::NumericGte {
+                path: vec![
+                    "policy".to_string(),
+                    "component_scores".to_string(),
+                    score_name.to_string(),
+                ],
+                min: expect_f64::<E>(value, &label)?,
+                label,
+            });
+        }
+
+        let Some(scores) =
+            get_map_path(self.root, &["policy", "component_scores"]).and_then(Value::as_object)
+        else {
+            return Ok(());
+        };
+        for (field, value) in scores {
+            let Some(score_name) = field.strip_suffix("_gte") else {
+                continue;
+            };
+            let label = format!("policy.component_scores.{field}");
+            self.used.push(label.clone());
+            self.criteria.push(Criterion::NumericGte {
+                path: vec![
+                    "policy".to_string(),
+                    "component_scores".to_string(),
+                    score_name.to_string(),
+                ],
+                min: expect_f64::<E>(value, &label)?,
+                label,
+            });
+        }
         Ok(())
     }
 
@@ -293,7 +385,7 @@ impl<'a> MatchParser<'a> {
         let unknown = collect_unknown_keys(self.root, &self.used);
         if !unknown.is_empty() {
             return Err(E::custom(format!(
-                "unsupported match key(s): {}; supported keys are type, severity_in, confidence_band_in, objects.paths_include, objects.ips_include, objects.<field>.length_gte, evidence.has_kind, fallback.mode_in, fallback.visibility_in, causal_score_gte, objects.sessions_differ, not_contains_text",
+                "unsupported match key(s): {}; supported keys are type, reason_code, severity_in, confidence_band_in, objects.paths_include, objects.ips_include, objects.ports_include, objects.<field>.length_gte, evidence.has_kind, fallback.mode_in, fallback.visibility_in, fallback.prompt_evidence_in, capture.mode_in, capture.redaction_in, causal_score_gte, policy.component_scores.<name>_gte, objects.sessions_differ, not_contains_text",
                 unknown.join(", ")
             )));
         }
@@ -375,7 +467,12 @@ fn collect_unknown_keys(root: &Map<String, Value>, used: &[String]) -> Vec<Strin
         if used.iter().any(|used| used == key) {
             continue;
         }
-        if key == "objects" || key == "fallback" || key == "evidence" {
+        if key == "objects"
+            || key == "fallback"
+            || key == "evidence"
+            || key == "capture"
+            || key == "policy"
+        {
             collect_unknown_nested_keys(key, value, used, &mut unknown);
         } else {
             unknown.push(key.clone());

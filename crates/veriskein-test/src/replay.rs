@@ -92,6 +92,8 @@ enum ReplayEvent {
         pid: u32,
         #[serde(default = "default_ssl_ctx")]
         ssl_ctx: u64,
+        #[serde(default = "default_content_channel")]
+        channel: String,
         #[serde(default)]
         offset: u64,
         #[serde(default = "default_direction")]
@@ -219,6 +221,7 @@ impl ReplayEvent {
             Self::ContentFrag {
                 pid,
                 ssl_ctx,
+                channel,
                 offset,
                 direction,
                 bytes,
@@ -227,7 +230,7 @@ impl ReplayEvent {
             } => EventFixture::for_pid(seq, *pid, 1, default_comm(comm, "proc")).content_frag(
                 *ssl_ctx,
                 *offset,
-                ContentChannel::Tls,
+                parse_content_channel(channel)?,
                 parse_direction(direction)?,
                 bytes.as_bytes(),
                 *truncated,
@@ -358,8 +361,44 @@ fn default_direction() -> String {
     "write".to_string()
 }
 
+fn default_content_channel() -> String {
+    "tls".to_string()
+}
+
 fn default_assoc_ret() -> i32 {
     1
+}
+
+fn parse_content_channel(channel: &str) -> Result<ContentChannel> {
+    match channel {
+        "tls" => Ok(ContentChannel::Tls),
+        "stdio" => Ok(ContentChannel::Stdio),
+        "pipe" => Ok(ContentChannel::Pipe),
+        "mcp" => Ok(ContentChannel::Mcp),
+        _ => bail!("unsupported content channel {channel}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_content_channel_accepts_non_tls_capture_modes() {
+        assert_eq!(
+            parse_content_channel("stdio").expect("stdio"),
+            ContentChannel::Stdio
+        );
+        assert_eq!(
+            parse_content_channel("pipe").expect("pipe"),
+            ContentChannel::Pipe
+        );
+        assert_eq!(
+            parse_content_channel("mcp").expect("mcp"),
+            ContentChannel::Mcp
+        );
+        assert!(parse_content_channel("unknown").is_err());
+    }
 }
 
 fn parse_direction(direction: &str) -> Result<ContentDirection> {

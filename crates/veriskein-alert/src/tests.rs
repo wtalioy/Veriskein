@@ -1,8 +1,8 @@
 use serde_json::Value;
 use veriskein_proto::defaults;
 use veriskein_proto::{
-    Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
-    VisibilityState,
+    ContentChannel, Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType,
+    PromptEvidenceState, VisibilityState,
 };
 
 use crate::{
@@ -77,7 +77,7 @@ fn mcp_tool_spoofing_projection_is_schema_valid() {
         ..FindingObjects::default()
     };
     finding.evidence = vec![FindingEvidence {
-        kind: "mcp_registry".to_string(),
+        kind: "heuristic".to_string(),
         event_id: "mcp-evt".to_string(),
         ingest_seq: 1,
         path: None,
@@ -96,6 +96,7 @@ fn mcp_tool_spoofing_projection_is_schema_valid() {
         .expect("value");
 
     assert_eq!(value["type"], "mcp_tool_spoofing");
+    assert_eq!(value["capture"]["mode"], "mcp");
     validate(&value).expect("schema valid");
 }
 
@@ -152,6 +153,28 @@ fn prompt_health_projects_prompt_metadata() {
     );
     assert_eq!(value["capture"]["mode"], "tls");
     validate(&value).expect("schema valid");
+}
+
+#[test]
+fn capture_mode_uses_prompt_capture_channels() {
+    for (modes, expected) in [
+        (vec![ContentChannel::Stdio], "stdio"),
+        (vec![ContentChannel::Pipe], "pipe"),
+        (vec![ContentChannel::Mcp], "mcp"),
+        (vec![ContentChannel::Tls, ContentChannel::Stdio], "hybrid"),
+    ] {
+        let mut finding = finding(FindingType::SensitiveFileAccess);
+        finding.health.prompt_evidence_state = PromptEvidenceState::Available;
+        finding.health.capture_modes = modes;
+
+        let value = AlertRecord::try_from_finding(&finding)
+            .expect("valid finding")
+            .as_value()
+            .expect("value");
+
+        assert_eq!(value["capture"]["mode"], expected);
+        validate(&value).expect("schema valid");
+    }
 }
 
 #[test]

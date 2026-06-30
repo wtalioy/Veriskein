@@ -22,8 +22,20 @@ fn alert() -> Value {
         ],
         "fallback": {
             "mode": "none",
-            "visibility": "full"
-        }
+            "visibility": "full",
+            "prompt_evidence": "available"
+        },
+        "policy": {
+            "component_scores": {
+                "causal_score": 0.82,
+                "match_score": 0.4
+            }
+        },
+        "capture": {
+            "mode": "tls",
+            "redaction": "masked"
+        },
+        "reason_code": "shell_exec_unapproved"
     })
 }
 
@@ -41,8 +53,19 @@ fn matches_phase_two_fields() {
         "evidence.has_kind": "syscall",
         "fallback": {
             "mode_in": ["none"],
-            "visibility_in": ["full", "partial"]
-        }
+            "visibility_in": ["full", "partial"],
+            "prompt_evidence_in": ["available"]
+        },
+        "capture.mode_in": ["tls"],
+        "capture.redaction_in": ["masked"],
+        "reason_code": "shell_exec_unapproved",
+        "policy.component_scores.causal_score_gte": 0.8,
+        "policy": {
+            "component_scores": {
+                "match_score_gte": 0.4
+            }
+        },
+        "objects.ports_include": [443]
     }));
 
     assert!(spec.matches(&alert()));

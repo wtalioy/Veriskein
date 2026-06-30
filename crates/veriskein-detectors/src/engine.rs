@@ -122,6 +122,7 @@ fn attach_prompt_evidence(finding: &mut Finding, prompt_evidence: &[PromptEviden
             VisibilityState::Full => PromptEvidenceState::Available,
             _ => PromptEvidenceState::Partial,
         };
+        finding.health.push_capture_mode(prompt.capture_mode);
         if prompt.visibility_state != VisibilityState::Full {
             finding.health.visibility_state = finding
                 .health
