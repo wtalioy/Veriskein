@@ -12,3 +12,8 @@ stdio = false
 mcp_stdio = false
 
 [limits]
+# ringbuf_size = 16777216
+# ipc_alerts_queue = 1024
+# ipc_events_queue = 8192
+# ipc_graph_queue = 4096
+# ipc_client_slow_timeout_ms = 2000

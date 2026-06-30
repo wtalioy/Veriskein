@@ -10,6 +10,8 @@ use crate::{IpcError, IpcResult};
 pub const IPC_VERSION: u32 = defaults::IPC_VERSION;
 pub const SCHEMA_VERSION: u32 = defaults::IPC_SCHEMA_VERSION;
 pub const IPC_ALERTS_QUEUE: usize = defaults::IPC_ALERTS_QUEUE;
+pub const IPC_EVENTS_QUEUE: usize = defaults::IPC_EVENTS_QUEUE;
+pub const IPC_GRAPH_QUEUE: usize = defaults::IPC_GRAPH_QUEUE;
 pub const IPC_CLIENT_SLOW_TIMEOUT_MS: u64 = defaults::IPC_CLIENT_SLOW_TIMEOUT_MS;
 pub const DEFAULT_SOCKET_NAME: &str = "veriskein.sock";
 
@@ -410,21 +412,30 @@ impl MetricsSnapshot {
 pub struct QueueDepths {
     pub alerts: usize,
     pub events: usize,
+    pub graph: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuePolicy {
     pub alerts_capacity: usize,
+    pub events_capacity: usize,
+    pub graph_capacity: usize,
     pub client_slow_timeout_ms: u64,
     pub alerts_overflow: QueueOverflowPolicy,
+    pub events_overflow: QueueOverflowPolicy,
+    pub graph_overflow: QueueOverflowPolicy,
 }
 
 impl Default for QueuePolicy {
     fn default() -> Self {
         Self {
             alerts_capacity: IPC_ALERTS_QUEUE,
+            events_capacity: IPC_EVENTS_QUEUE,
+            graph_capacity: IPC_GRAPH_QUEUE,
             client_slow_timeout_ms: IPC_CLIENT_SLOW_TIMEOUT_MS,
             alerts_overflow: QueueOverflowPolicy::DropClientOnLag,
+            events_overflow: QueueOverflowPolicy::ReportDropAndContinue,
+            graph_overflow: QueueOverflowPolicy::DropClientOnLag,
         }
     }
 }
@@ -433,6 +444,7 @@ impl Default for QueuePolicy {
 #[serde(rename_all = "snake_case")]
 pub enum QueueOverflowPolicy {
     DropClientOnLag,
+    ReportDropAndContinue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

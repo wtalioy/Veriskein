@@ -82,6 +82,7 @@ fn round_trips_metrics_frame() {
     metrics.queue_depths = QueueDepths {
         alerts: 3,
         events: 2,
+        graph: 1,
     };
     let frame = IpcFrame::Metrics(MetricsFrame::new(metrics));
 

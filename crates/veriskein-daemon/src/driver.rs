@@ -26,12 +26,13 @@ const METRICS_EMIT_INTERVAL: Duration = Duration::from_secs(1);
 const HEALTH_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 const EVENT_LOOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(test)]
-const TEST_DRIVER_DRAIN_DELAY: Duration = Duration::from_millis(350);
+const TEST_DRIVER_DRAIN_DELAY: Duration = Duration::from_millis(750);
 
 pub async fn run(cli: Cli) -> Result<()> {
     preflight(&cli)?;
     let config_root = resolve_config_root()?;
     let bpf_config = load_bpf_runtime_config(&config_root, &cli)?;
+    let content_capture = load_content_capture_settings(&config_root)?;
     let source = RuntimeEventSource::start_with_config(bpf_config.clone())
         .context("start BPF event source")?;
     let sink = open_sink(cli.alert_output.as_deref()).context("open alert sink")?;
@@ -47,11 +48,13 @@ pub async fn run(cli: Cli) -> Result<()> {
     run_with_source_and_sink(
         source,
         sink,
-        cli,
-        &config_root,
-        load_content_capture_settings(&config_root)?,
-        initial_runtime_health(&bpf_config),
-        ipc,
+        RuntimeRunConfig {
+            cli,
+            config_root,
+            content_capture,
+            initial_health: initial_runtime_health(&bpf_config),
+            ipc,
+        },
         Shutdown::Signal(sigterm),
     )
     .await
@@ -106,6 +109,8 @@ pub(crate) struct IpcConfig {
 struct LimitsConfig {
     ringbuf_size: Option<usize>,
     ipc_alerts_queue: Option<usize>,
+    ipc_events_queue: Option<usize>,
+    ipc_graph_queue: Option<usize>,
     ipc_client_slow_timeout_ms: Option<u64>,
 }
 
@@ -173,11 +178,21 @@ fn ipc_settings_from_defaults(defaults: DefaultsConfig) -> IpcSettings {
                 .limits
                 .ipc_alerts_queue
                 .unwrap_or(default_policy.alerts_capacity),
+            events_capacity: defaults
+                .limits
+                .ipc_events_queue
+                .unwrap_or(default_policy.events_capacity),
+            graph_capacity: defaults
+                .limits
+                .ipc_graph_queue
+                .unwrap_or(default_policy.graph_capacity),
             client_slow_timeout_ms: defaults
                 .limits
                 .ipc_client_slow_timeout_ms
                 .unwrap_or(default_policy.client_slow_timeout_ms),
             alerts_overflow: default_policy.alerts_overflow,
+            events_overflow: default_policy.events_overflow,
+            graph_overflow: default_policy.graph_overflow,
         },
     }
 }
@@ -296,6 +311,7 @@ impl MetricsTick {
 struct RuntimeHealthTracker {
     health: RuntimeHealth,
     counters: CounterWindow,
+    last_detail_evictions_total: u64,
 }
 
 impl RuntimeHealthTracker {
@@ -303,6 +319,7 @@ impl RuntimeHealthTracker {
         Self {
             health: initial,
             counters: CounterWindow::new(),
+            last_detail_evictions_total: 0,
         }
     }
 
@@ -334,14 +351,21 @@ impl RuntimeHealthTracker {
         if drop_rate >= veriskein_proto::defaults::DROP_RATE_DEGRADE_THRESHOLD {
             sources.push(DEGRADATION_SOURCE_RINGBUF_DROP_RATE.to_string());
         }
-        if detail_evictions_total > 0 {
+        let detail_eviction_delta =
+            detail_evictions_total.saturating_sub(self.last_detail_evictions_total);
+        self.last_detail_evictions_total = detail_evictions_total;
+        if detail_eviction_delta > 0 {
             sources.push(DEGRADATION_SOURCE_RETENTION_EVICTION.to_string());
         }
         if sources.is_empty() {
             self.health = RuntimeHealth::full();
         } else {
             self.health = RuntimeHealth {
-                pressure: PressureLevel::Degraded,
+                pressure: if drop_rate >= veriskein_proto::defaults::DROP_RATE_CRITICAL_THRESHOLD {
+                    PressureLevel::Critical
+                } else {
+                    PressureLevel::Degraded
+                },
                 drop_rate,
                 degradation_sources: sources,
             };
@@ -434,26 +458,33 @@ impl Shutdown {
     }
 }
 
-async fn run_with_source_and_sink<S>(
-    mut source: S,
-    mut sink: Box<dyn Write + Send>,
+struct RuntimeRunConfig {
     cli: Cli,
-    config_root: &Path,
+    config_root: std::path::PathBuf,
     content_capture: ContentCaptureSettings,
     initial_health: RuntimeHealth,
     ipc: Option<IpcServer>,
+}
+
+async fn run_with_source_and_sink<S>(
+    mut source: S,
+    mut sink: Box<dyn Write + Send>,
+    config: RuntimeRunConfig,
     mut shutdown: Shutdown,
 ) -> Result<()>
 where
     S: EventSource + Send + 'static,
 {
-    let mut pipeline =
-        RuntimePipeline::new_with_content_capture(config_root, &cli.workspaces, content_capture)?;
-    let mut health = RuntimeHealthTracker::new(initial_health);
+    let mut pipeline = RuntimePipeline::new_with_content_capture(
+        &config.config_root,
+        &config.cli.workspaces,
+        config.content_capture,
+    )?;
+    let mut health = RuntimeHealthTracker::new(config.initial_health);
     let mut metrics = MetricsTick::new();
 
     info!("veriskein runtime started");
-    info!("using config root {}", config_root.display());
+    info!("using config root {}", config.config_root.display());
     loop {
         tokio::select! {
             biased;
@@ -470,9 +501,9 @@ where
                         Ok(Some(raw)) => {
                             pipeline.set_runtime_health(health.current().clone());
                             let alerts =
-                                pipeline.process_raw_event_bytes(&raw, &mut *sink, cli.dry_run)?;
+                                pipeline.process_raw_event_bytes(&raw, &mut *sink, config.cli.dry_run)?;
                             metrics.add_detector_fires(alerts.len());
-                            if let Some(ipc) = &ipc {
+                            if let Some(ipc) = &config.ipc {
                                 for event in pipeline.drain_ipc_events() {
                                     ipc.publish_event(EventFrame::new(
                                         event.event_id,
@@ -503,7 +534,7 @@ where
                     }
                 }
                 if let Some(sample) = metrics.maybe_log(pipeline.collector_counters())
-                    && let Some(ipc) = &ipc
+                    && let Some(ipc) = &config.ipc
                 {
                     ipc.publish_metrics(
                         pipeline.collector_counters(),
@@ -522,7 +553,7 @@ where
         }
     }
     source.shutdown().context("stop event source")?;
-    if let Some(ipc) = ipc {
+    if let Some(ipc) = config.ipc {
         ipc.shutdown().await;
     }
     sink.flush().context("flush alert sink")?;
@@ -566,7 +597,9 @@ mod tests {
     use tokio::sync::oneshot;
     use veriskein_proto::{ContentChannel, ContentDirection, EventFixture};
 
-    use super::{EventSource, Result, Shutdown, open_sink, run_with_source_and_sink};
+    use super::{
+        EventSource, Result, RuntimeRunConfig, Shutdown, open_sink, run_with_source_and_sink,
+    };
     use crate::Cli;
 
     struct FakeSource {
@@ -595,6 +628,55 @@ mod tests {
         super::resolve_config_root().expect("repo root")
     }
 
+    fn force_health_window_due(health: &mut super::RuntimeHealthTracker) {
+        health.counters.last_at = std::time::Instant::now() - super::HEALTH_UPDATE_INTERVAL;
+    }
+
+    #[test]
+    fn runtime_health_eviction_degradation_recovers_after_clean_window() {
+        let mut health = super::RuntimeHealthTracker::new(veriskein_alert::RuntimeHealth::full());
+        let counters = veriskein_collector::CollectorCounters {
+            raw_events_total: 100,
+            emitted_events_total: 100,
+            reorder_or_drop_total: 0,
+        };
+
+        force_health_window_due(&mut health);
+        health.maybe_update(&counters, 1);
+        assert!(
+            health
+                .current()
+                .degradation_sources
+                .iter()
+                .any(|source| source == super::DEGRADATION_SOURCE_RETENTION_EVICTION)
+        );
+
+        force_health_window_due(&mut health);
+        health.maybe_update(&counters, 1);
+        assert_eq!(
+            health.current().pressure,
+            veriskein_alert::PressureLevel::Nominal
+        );
+    }
+
+    #[test]
+    fn runtime_health_marks_critical_drop_pressure() {
+        let mut health = super::RuntimeHealthTracker::new(veriskein_alert::RuntimeHealth::full());
+        let counters = veriskein_collector::CollectorCounters {
+            raw_events_total: 100,
+            emitted_events_total: 90,
+            reorder_or_drop_total: 10,
+        };
+
+        force_health_window_due(&mut health);
+        health.maybe_update(&counters, 0);
+
+        assert_eq!(
+            health.current().pressure,
+            veriskein_alert::PressureLevel::Critical
+        );
+    }
+
     const TEST_ROOT_PID: u32 = 900_100;
     const TEST_CHILD_PID: u32 = 900_101;
 
@@ -615,18 +697,20 @@ mod tests {
             run_with_source_and_sink(
                 source,
                 sink,
-                Cli {
-                    workspaces: vec!["/tmp/ws".into()],
-                    dry_run,
-                    alert_output: None,
-                    ringbuf_size: None,
-                    ipc_sock: None,
-                    no_ipc: true,
+                RuntimeRunConfig {
+                    cli: Cli {
+                        workspaces: vec!["/tmp/ws".into()],
+                        dry_run,
+                        alert_output: None,
+                        ringbuf_size: None,
+                        ipc_sock: None,
+                        no_ipc: true,
+                    },
+                    config_root: config_root(),
+                    content_capture: super::ContentCaptureSettings::default(),
+                    initial_health: veriskein_alert::RuntimeHealth::full(),
+                    ipc: None,
                 },
-                &config_root(),
-                super::ContentCaptureSettings::default(),
-                veriskein_alert::RuntimeHealth::full(),
-                None,
                 Shutdown::Oneshot(shutdown_rx),
             )
             .await

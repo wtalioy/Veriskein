@@ -1,7 +1,9 @@
+use std::collections::VecDeque;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -14,11 +16,12 @@ use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 use veriskein_collector::CollectorCounters;
 use veriskein_ipc::IpcError;
-use veriskein_ipc::QueuePolicy;
 use veriskein_ipc::{
-    AlertFrame, ErrorCode, ErrorFrame, EventFrame, GraphFrame, HelloFrame, IpcFrame, MetricsFrame,
-    MetricsSnapshot, ReplyFrame, Topic, WelcomeFrame, decode_ndjson, encode_ndjson,
+    AlertFrame, ErrorCode, ErrorFrame, EventFrame, EventsDroppedFrame, GraphFrame, HelloFrame,
+    IpcFrame, MetricsFrame, MetricsSnapshot, QueryFrame, ReplyFrame, Topic, WelcomeFrame,
+    decode_ndjson, encode_ndjson,
 };
+use veriskein_ipc::{QueueOverflowPolicy, QueuePolicy};
 use veriskein_proto::EventId;
 
 const SERVER_NAME: &str = "veriskein-daemon";
@@ -38,13 +41,78 @@ pub(crate) struct IpcServer {
     events_tx: broadcast::Sender<IpcFrame>,
     graph_tx: broadcast::Sender<IpcFrame>,
     metrics_tx: watch::Sender<IpcFrame>,
+    history: Arc<Mutex<IpcHistory>>,
     handle: JoinHandle<()>,
+}
+
+#[derive(Debug)]
+struct IpcHistory {
+    alerts: VecDeque<HistoryItem>,
+    events: VecDeque<HistoryItem>,
+    graph: VecDeque<HistoryItem>,
+    metrics: Option<HistoryItem>,
+    next_cursor: u64,
+    alerts_capacity: usize,
+    events_capacity: usize,
+    graph_capacity: usize,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryItem {
+    cursor: u64,
+    frame: IpcFrame,
+}
+
+impl IpcHistory {
+    fn new(policy: &QueuePolicy) -> Self {
+        Self {
+            alerts: VecDeque::with_capacity(policy.alerts_capacity.min(1024)),
+            events: VecDeque::with_capacity(policy.events_capacity.min(1024)),
+            graph: VecDeque::with_capacity(policy.graph_capacity.min(1024)),
+            metrics: None,
+            next_cursor: 1,
+            alerts_capacity: policy.alerts_capacity,
+            events_capacity: policy.events_capacity,
+            graph_capacity: policy.graph_capacity,
+        }
+    }
+
+    fn push_alert(&mut self, frame: IpcFrame) {
+        let item = self.next_item(frame);
+        push_bounded(&mut self.alerts, self.alerts_capacity, item);
+    }
+
+    fn push_event(&mut self, frame: IpcFrame) {
+        let item = self.next_item(frame);
+        push_bounded(&mut self.events, self.events_capacity, item);
+    }
+
+    fn push_graph(&mut self, frame: IpcFrame) {
+        let item = self.next_item(frame);
+        push_bounded(&mut self.graph, self.graph_capacity, item);
+    }
+
+    fn set_metrics(&mut self, frame: IpcFrame) {
+        self.metrics = Some(self.next_item(frame));
+    }
+
+    fn next_item(&mut self, frame: IpcFrame) -> HistoryItem {
+        let cursor = self.next_cursor;
+        self.next_cursor = self.next_cursor.saturating_add(1);
+        HistoryItem { cursor, frame }
+    }
 }
 
 impl IpcServer {
     pub(crate) async fn start(path: PathBuf, settings: IpcSettings) -> Result<Self> {
         if settings.queue_policy.alerts_capacity == 0 {
             bail!("IPC alerts queue capacity must be at least 1");
+        }
+        if settings.queue_policy.events_capacity == 0 {
+            bail!("IPC events queue capacity must be at least 1");
+        }
+        if settings.queue_policy.graph_capacity == 0 {
+            bail!("IPC graph queue capacity must be at least 1");
         }
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -59,14 +127,16 @@ impl IpcServer {
             .with_context(|| format!("chmod IPC socket {}", path.display()))?;
 
         let (alerts_tx, _) = broadcast::channel(settings.queue_policy.alerts_capacity);
-        let (events_tx, _) = broadcast::channel(settings.queue_policy.alerts_capacity);
-        let (graph_tx, _) = broadcast::channel(settings.queue_policy.alerts_capacity);
+        let (events_tx, _) = broadcast::channel(settings.queue_policy.events_capacity);
+        let (graph_tx, _) = broadcast::channel(settings.queue_policy.graph_capacity);
         let (metrics_tx, metrics_rx) = watch::channel(IpcFrame::Metrics(MetricsFrame::new(
             MetricsSnapshot::new(now_ns()),
         )));
+        let history = Arc::new(Mutex::new(IpcHistory::new(&settings.queue_policy)));
         let connection_alerts = alerts_tx.clone();
         let connection_events = events_tx.clone();
         let connection_graph = graph_tx.clone();
+        let connection_history = Arc::clone(&history);
         let run_id =
             EventId::from_seed(format!("{}:{}", std::process::id(), now_ns()).as_bytes()).hex();
         let handle = tokio::spawn(async move {
@@ -77,11 +147,20 @@ impl IpcServer {
                         let events_rx = connection_events.subscribe();
                         let graph_rx = connection_graph.subscribe();
                         let metrics_rx = metrics_rx.clone();
+                        let history = Arc::clone(&connection_history);
                         let settings = settings.clone();
                         let run_id = run_id.clone();
                         tokio::spawn(async move {
                             if let Err(err) = serve_client(
-                                stream, alerts_rx, events_rx, graph_rx, metrics_rx, &settings,
+                                stream,
+                                ClientStreams {
+                                    alerts_rx,
+                                    events_rx,
+                                    graph_rx,
+                                    metrics_rx,
+                                    history,
+                                },
+                                &settings,
                                 &run_id,
                             )
                             .await
@@ -103,20 +182,33 @@ impl IpcServer {
             events_tx,
             graph_tx,
             metrics_tx,
+            history,
             handle,
         })
     }
 
     pub(crate) fn publish_alert(&self, alert: Value) {
-        let _ = self.alerts_tx.send(IpcFrame::Alert(AlertFrame::new(alert)));
+        let frame = IpcFrame::Alert(AlertFrame::new(alert));
+        if let Ok(mut history) = self.history.lock() {
+            history.push_alert(frame.clone());
+        }
+        let _ = self.alerts_tx.send(frame);
     }
 
     pub(crate) fn publish_event(&self, event: EventFrame) {
-        let _ = self.events_tx.send(IpcFrame::Event(event));
+        let frame = IpcFrame::Event(event);
+        if let Ok(mut history) = self.history.lock() {
+            history.push_event(frame.clone());
+        }
+        let _ = self.events_tx.send(frame);
     }
 
     pub(crate) fn publish_graph(&self, graph: GraphFrame) {
-        let _ = self.graph_tx.send(IpcFrame::Graph(graph));
+        let frame = IpcFrame::Graph(graph);
+        if let Ok(mut history) = self.history.lock() {
+            history.push_graph(frame.clone());
+        }
+        let _ = self.graph_tx.send(frame);
     }
 
     pub(crate) fn publish_metrics(
@@ -153,9 +245,12 @@ impl IpcServer {
             .insert("detector_fires_per_s".to_string(), detector_fires_per_s);
         metrics.queue_depths.alerts = self.alerts_tx.len();
         metrics.queue_depths.events = self.events_tx.len();
-        let _ = self
-            .metrics_tx
-            .send(IpcFrame::Metrics(MetricsFrame::new(metrics)));
+        metrics.queue_depths.graph = self.graph_tx.len();
+        let frame = IpcFrame::Metrics(MetricsFrame::new(metrics));
+        if let Ok(mut history) = self.history.lock() {
+            history.set_metrics(frame.clone());
+        }
+        let _ = self.metrics_tx.send(frame);
     }
 
     pub(crate) async fn shutdown(self) {
@@ -164,12 +259,17 @@ impl IpcServer {
     }
 }
 
+struct ClientStreams {
+    alerts_rx: broadcast::Receiver<IpcFrame>,
+    events_rx: broadcast::Receiver<IpcFrame>,
+    graph_rx: broadcast::Receiver<IpcFrame>,
+    metrics_rx: watch::Receiver<IpcFrame>,
+    history: Arc<Mutex<IpcHistory>>,
+}
+
 async fn serve_client(
     stream: UnixStream,
-    mut alerts_rx: broadcast::Receiver<IpcFrame>,
-    mut events_rx: broadcast::Receiver<IpcFrame>,
-    mut graph_rx: broadcast::Receiver<IpcFrame>,
-    mut metrics_rx: watch::Receiver<IpcFrame>,
+    mut streams: ClientStreams,
     settings: &IpcSettings,
     run_id: &str,
 ) -> Result<()> {
@@ -245,33 +345,51 @@ async fn serve_client(
     .await?;
 
     if subscriptions.contains(&Topic::Metrics) {
-        let frame = metrics_rx.borrow().clone();
+        let frame = streams.metrics_rx.borrow().clone();
         write_frame(&mut write_half, &frame, slow_timeout_ms).await?;
     }
 
     let mut client_line = Vec::new();
     loop {
         tokio::select! {
-            alert = alerts_rx.recv(), if subscriptions.contains(&Topic::Alert) => {
-                if !handle_broadcast_frame(alert, &mut write_half, slow_timeout_ms, "alert").await? {
+            alert = streams.alerts_rx.recv(), if subscriptions.contains(&Topic::Alert) => {
+                if !handle_broadcast_frame(
+                    alert,
+                    &mut write_half,
+                    slow_timeout_ms,
+                    "alert",
+                    settings.queue_policy.alerts_overflow,
+                ).await? {
                     return Ok(());
                 }
             }
-            event = events_rx.recv(), if subscriptions.contains(&Topic::Events) => {
-                if !handle_broadcast_frame(event, &mut write_half, slow_timeout_ms, "event").await? {
+            event = streams.events_rx.recv(), if subscriptions.contains(&Topic::Events) => {
+                if !handle_topic_frame(
+                    event,
+                    &mut write_half,
+                    slow_timeout_ms,
+                    "event",
+                    settings.queue_policy.events_overflow,
+                ).await? {
                     return Ok(());
                 }
             }
-            graph = graph_rx.recv(), if subscriptions.contains(&Topic::Graph) => {
-                if !handle_broadcast_frame(graph, &mut write_half, slow_timeout_ms, "graph").await? {
+            graph = streams.graph_rx.recv(), if subscriptions.contains(&Topic::Graph) => {
+                if !handle_broadcast_frame(
+                    graph,
+                    &mut write_half,
+                    slow_timeout_ms,
+                    "graph",
+                    settings.queue_policy.graph_overflow,
+                ).await? {
                     return Ok(());
                 }
             }
-            changed = metrics_rx.changed(), if subscriptions.contains(&Topic::Metrics) => {
+            changed = streams.metrics_rx.changed(), if subscriptions.contains(&Topic::Metrics) => {
                 if changed.is_err() {
                     return Ok(());
                 }
-                let frame = metrics_rx.borrow().clone();
+                let frame = streams.metrics_rx.borrow().clone();
                 write_frame(&mut write_half, &frame, slow_timeout_ms).await?;
             }
             line = read_bounded_line(&mut reader, &mut client_line, MAX_IPC_FRAME_BYTES) => {
@@ -280,11 +398,7 @@ async fn serve_client(
                     Ok(_) => {
                         match decode_ndjson(std::str::from_utf8(&client_line).context("decode IPC client frame as utf-8")?) {
                             Ok(IpcFrame::Query(query)) => {
-                                let reply = IpcFrame::Reply(ReplyFrame::error(
-                                    query.query_id,
-                                    query.topic,
-                                    "historical IPC queries are not implemented yet",
-                                ));
+                                let reply = query_history(&streams.history, query);
                                 write_frame(&mut write_half, &reply, slow_timeout_ms).await?;
                             }
                             Ok(_) => {
@@ -327,6 +441,7 @@ async fn handle_broadcast_frame<W>(
     stream: &mut W,
     timeout_ms: u64,
     topic_name: &str,
+    policy: QueueOverflowPolicy,
 ) -> Result<bool>
 where
     W: AsyncWrite + Unpin,
@@ -336,7 +451,47 @@ where
             write_frame(stream, &frame, timeout_ms).await?;
             Ok(true)
         }
-        Err(broadcast::error::RecvError::Lagged(_)) => {
+        Err(broadcast::error::RecvError::Lagged(count)) => {
+            handle_lagged_topic(stream, timeout_ms, topic_name, policy, count).await
+        }
+        Err(broadcast::error::RecvError::Closed) => Ok(false),
+    }
+}
+
+async fn handle_topic_frame<W>(
+    frame: Result<IpcFrame, broadcast::error::RecvError>,
+    stream: &mut W,
+    timeout_ms: u64,
+    topic_name: &str,
+    policy: QueueOverflowPolicy,
+) -> Result<bool>
+where
+    W: AsyncWrite + Unpin,
+{
+    match frame {
+        Ok(frame) => {
+            write_frame(stream, &frame, timeout_ms).await?;
+            Ok(true)
+        }
+        Err(broadcast::error::RecvError::Lagged(count)) => {
+            handle_lagged_topic(stream, timeout_ms, topic_name, policy, count).await
+        }
+        Err(broadcast::error::RecvError::Closed) => Ok(false),
+    }
+}
+
+async fn handle_lagged_topic<W>(
+    stream: &mut W,
+    timeout_ms: u64,
+    topic_name: &str,
+    policy: QueueOverflowPolicy,
+    count: u64,
+) -> Result<bool>
+where
+    W: AsyncWrite + Unpin,
+{
+    match policy {
+        QueueOverflowPolicy::DropClientOnLag => {
             write_error(
                 stream,
                 ErrorCode::QueueOverflow,
@@ -346,8 +501,126 @@ where
             .await?;
             Ok(false)
         }
-        Err(broadcast::error::RecvError::Closed) => Ok(false),
+        QueueOverflowPolicy::ReportDropAndContinue => {
+            write_frame(
+                stream,
+                &IpcFrame::EventsDropped(EventsDroppedFrame::new(
+                    now_ns(),
+                    count,
+                    format!("{topic_name}_client_lagged"),
+                )),
+                timeout_ms,
+            )
+            .await?;
+            Ok(true)
+        }
     }
+}
+
+fn query_history(history: &Arc<Mutex<IpcHistory>>, query: QueryFrame) -> IpcFrame {
+    let Ok(history) = history.lock() else {
+        return IpcFrame::Reply(ReplyFrame::error(
+            query.query_id,
+            query.topic,
+            "IPC history is unavailable",
+        ));
+    };
+    let items = match query.topic {
+        Topic::Alert => history_items(&history.alerts, query.after.as_deref(), query.limit),
+        Topic::Events => history_items(&history.events, query.after.as_deref(), query.limit),
+        Topic::Graph => history_items(&history.graph, query.after.as_deref(), query.limit),
+        Topic::Metrics => history
+            .metrics
+            .as_ref()
+            .filter(|item| item_after_cursor(item, query.after.as_deref()))
+            .and_then(history_payload)
+            .into_iter()
+            .collect(),
+        _ => {
+            return IpcFrame::Reply(ReplyFrame::error(
+                query.query_id,
+                query.topic,
+                "topic is not queryable",
+            ));
+        }
+    };
+    IpcFrame::Reply(ReplyFrame::ok(query.query_id, query.topic, items))
+}
+
+fn history_items(
+    frames: &VecDeque<HistoryItem>,
+    after: Option<&str>,
+    limit: Option<usize>,
+) -> Vec<Value> {
+    let limit = limit.unwrap_or(100).min(1_000);
+    frames
+        .iter()
+        .filter(|item| item_after_cursor(item, after))
+        .filter_map(history_payload)
+        .take(limit)
+        .collect()
+}
+
+fn item_after_cursor(item: &HistoryItem, after: Option<&str>) -> bool {
+    after
+        .and_then(|cursor| cursor.parse::<u64>().ok())
+        .is_none_or(|cursor| item.cursor > cursor)
+}
+
+fn history_payload(item: &HistoryItem) -> Option<Value> {
+    frame_payload(&item.frame).map(|payload| {
+        serde_json::json!({
+            "cursor": item.cursor.to_string(),
+            "ts_ns": frame_ts_ns(&item.frame),
+            "topic": topic_name(item.frame.topic()),
+            "payload": payload,
+        })
+    })
+}
+
+fn frame_payload(frame: &IpcFrame) -> Option<Value> {
+    match frame {
+        IpcFrame::Alert(frame) => Some(frame.alert.clone()),
+        IpcFrame::Event(frame) => serde_json::to_value(frame).ok(),
+        IpcFrame::Graph(frame) => Some(frame.graph.clone()),
+        IpcFrame::Metrics(frame) => serde_json::to_value(&frame.metrics).ok(),
+        _ => None,
+    }
+}
+
+fn frame_ts_ns(frame: &IpcFrame) -> u64 {
+    match frame {
+        IpcFrame::Alert(frame) => frame.alert["ts_ns"].as_u64().unwrap_or(0),
+        IpcFrame::Event(frame) => frame.ts_ns,
+        IpcFrame::EventsDropped(frame) => frame.ts_ns,
+        IpcFrame::Graph(frame) => frame.ts_ns,
+        IpcFrame::Metrics(frame) => frame.metrics.ts_ns,
+        _ => 0,
+    }
+}
+
+fn topic_name(topic: Topic) -> &'static str {
+    match topic {
+        Topic::Hello => "hello",
+        Topic::Welcome => "welcome",
+        Topic::Error => "error",
+        Topic::Alert => "alerts",
+        Topic::Metrics => "metrics",
+        Topic::Events => "events",
+        Topic::Graph => "graph",
+        Topic::Query => "query",
+        Topic::Reply => "reply",
+    }
+}
+
+fn push_bounded(queue: &mut VecDeque<HistoryItem>, capacity: usize, item: HistoryItem) {
+    if capacity == 0 {
+        return;
+    }
+    while queue.len() >= capacity {
+        queue.pop_front();
+    }
+    queue.push_back(item);
 }
 
 async fn read_bounded_line<R>(reader: &mut R, out: &mut Vec<u8>, max_len: usize) -> Result<usize>
@@ -509,8 +782,12 @@ mod tests {
         let settings = IpcSettings {
             queue_policy: QueuePolicy {
                 alerts_capacity: 0,
+                events_capacity: 1,
+                graph_capacity: 1,
                 client_slow_timeout_ms: 1,
                 alerts_overflow: QueueOverflowPolicy::DropClientOnLag,
+                events_overflow: QueueOverflowPolicy::ReportDropAndContinue,
+                graph_overflow: QueueOverflowPolicy::DropClientOnLag,
             },
             ..IpcSettings::default()
         };
@@ -565,11 +842,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipc_server_replies_to_query_frames() {
+    async fn ipc_server_replies_to_recent_alert_queries() {
         let dir = tempdir().expect("tempdir");
         let server = IpcServer::start(dir.path().join("veriskein.sock"), IpcSettings::default())
             .await
             .expect("start server");
+        server.publish_alert(json!({"alert_id":"alert-1","type":"unexpected_shell"}));
         let stream = UnixStream::connect(dir.path().join("veriskein.sock"))
             .await
             .expect("connect");
@@ -596,10 +874,10 @@ mod tests {
         reader
             .get_mut()
             .write_all(
-                encode_ndjson(&IpcFrame::Query(veriskein_ipc::QueryFrame::new(
-                    "q-1",
-                    Topic::Events,
-                )))
+                encode_ndjson(&IpcFrame::Query(veriskein_ipc::QueryFrame {
+                    limit: Some(10),
+                    ..veriskein_ipc::QueryFrame::new("q-1", Topic::Alert)
+                }))
                 .expect("encode query")
                 .as_bytes(),
             )
@@ -612,9 +890,90 @@ mod tests {
             panic!("expected reply");
         };
         assert_eq!(reply.query_id, "q-1");
-        assert!(!reply.ok);
+        assert!(reply.ok);
+        assert_eq!(reply.items[0]["topic"], "alerts");
+        assert_eq!(reply.items[0]["payload"]["alert_id"], "alert-1");
+        let cursor = reply.items[0]["cursor"]
+            .as_str()
+            .expect("cursor")
+            .to_string();
+
+        reader
+            .get_mut()
+            .write_all(
+                encode_ndjson(&IpcFrame::Query(veriskein_ipc::QueryFrame {
+                    after: Some(cursor),
+                    ..veriskein_ipc::QueryFrame::new("q-2", Topic::Alert)
+                }))
+                .expect("encode query")
+                .as_bytes(),
+            )
+            .await
+            .expect("write query");
+
+        let mut reply = String::new();
+        reader.read_line(&mut reply).await.expect("read reply");
+        let IpcFrame::Reply(reply) = decode_ndjson(&reply).expect("decode reply") else {
+            panic!("expected reply");
+        };
+        assert_eq!(reply.query_id, "q-2");
+        assert!(reply.ok);
+        assert!(reply.items.is_empty());
 
         server.shutdown().await;
+    }
+
+    #[test]
+    fn ipc_history_queries_envelope_events_graph_and_metrics() {
+        let history = Arc::new(Mutex::new(IpcHistory::new(&QueuePolicy::default())));
+        {
+            let mut history = history.lock().expect("history");
+            history.push_event(IpcFrame::Event(EventFrame::new(
+                "evt-1",
+                10,
+                "proc_exec",
+                42,
+                Some("session-1".to_string()),
+                json!({"argv":["agent"]}),
+            )));
+            history.push_graph(IpcFrame::Graph(GraphFrame::new(
+                11,
+                json!({"op":"bind","session_id":"session-1"}),
+            )));
+            history.set_metrics(IpcFrame::Metrics(MetricsFrame::new(MetricsSnapshot::new(
+                12,
+            ))));
+        }
+
+        let IpcFrame::Reply(events) = query_history(
+            &history,
+            veriskein_ipc::QueryFrame::new("events", Topic::Events),
+        ) else {
+            panic!("expected events reply");
+        };
+        assert!(events.ok);
+        assert_eq!(events.items[0]["topic"], "events");
+        assert_eq!(events.items[0]["payload"]["event_id"], "evt-1");
+
+        let IpcFrame::Reply(graph) = query_history(
+            &history,
+            veriskein_ipc::QueryFrame::new("graph", Topic::Graph),
+        ) else {
+            panic!("expected graph reply");
+        };
+        assert!(graph.ok);
+        assert_eq!(graph.items[0]["topic"], "graph");
+        assert_eq!(graph.items[0]["payload"]["op"], "bind");
+
+        let IpcFrame::Reply(metrics) = query_history(
+            &history,
+            veriskein_ipc::QueryFrame::new("metrics", Topic::Metrics),
+        ) else {
+            panic!("expected metrics reply");
+        };
+        assert!(metrics.ok);
+        assert_eq!(metrics.items[0]["topic"], "metrics");
+        assert_eq!(metrics.items[0]["payload"]["ts_ns"], 12);
     }
 
     #[tokio::test]
@@ -659,19 +1018,77 @@ mod tests {
             json!({"op":"bind","pid":42,"role":"root_agent"}),
         ));
 
-        let mut event = String::new();
-        reader.read_line(&mut event).await.expect("read event");
-        let IpcFrame::Event(event) = decode_ndjson(&event).expect("decode event") else {
-            panic!("expected event");
-        };
-        assert_eq!(event.event_id, "evt-1");
+        let mut first = String::new();
+        let mut second = String::new();
+        reader.read_line(&mut first).await.expect("read first");
+        reader.read_line(&mut second).await.expect("read second");
+        let frames = [
+            decode_ndjson(&first).expect("decode first"),
+            decode_ndjson(&second).expect("decode second"),
+        ];
+        assert!(
+            frames.iter().any(|frame| {
+                matches!(frame, IpcFrame::Event(event) if event.event_id == "evt-1")
+            })
+        );
+        assert!(frames.iter().any(|frame| {
+            matches!(frame, IpcFrame::Graph(graph) if graph.graph["op"] == "bind")
+        }));
 
-        let mut graph = String::new();
-        reader.read_line(&mut graph).await.expect("read graph");
-        let IpcFrame::Graph(graph) = decode_ndjson(&graph).expect("decode graph") else {
-            panic!("expected graph");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ipc_server_reports_lagged_event_clients() {
+        let dir = tempdir().expect("tempdir");
+        let server = IpcServer::start(
+            dir.path().join("veriskein.sock"),
+            IpcSettings {
+                queue_policy: QueuePolicy {
+                    events_capacity: 1,
+                    ..QueuePolicy::default()
+                },
+                ..IpcSettings::default()
+            },
+        )
+        .await
+        .expect("start server");
+        let stream = UnixStream::connect(dir.path().join("veriskein.sock"))
+            .await
+            .expect("connect");
+        let mut reader = BufReader::new(stream);
+        let mut hello = HelloFrame::new("test-client");
+        hello.subscriptions = vec![Topic::Events];
+        reader
+            .get_mut()
+            .write_all(
+                encode_ndjson(&IpcFrame::Hello(hello))
+                    .expect("encode hello")
+                    .as_bytes(),
+            )
+            .await
+            .expect("write hello");
+
+        let mut welcome = String::new();
+        reader.read_line(&mut welcome).await.expect("read welcome");
+        for index in 0..3 {
+            server.publish_event(EventFrame::new(
+                format!("evt-{index}"),
+                index,
+                "proc_exec",
+                42,
+                None,
+                json!({"index":index}),
+            ));
+        }
+
+        let mut dropped = String::new();
+        reader.read_line(&mut dropped).await.expect("read dropped");
+        let IpcFrame::EventsDropped(dropped) = decode_ndjson(&dropped).expect("decode dropped")
+        else {
+            panic!("expected events_dropped");
         };
-        assert_eq!(graph.graph["op"], "bind");
+        assert!(dropped.dropped >= 1);
 
         server.shutdown().await;
     }
