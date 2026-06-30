@@ -23,6 +23,14 @@ pub struct Cli {
     pub ipc_sock: Option<PathBuf>,
     #[arg(long = "no-ipc")]
     pub no_ipc: bool,
+    /// Skip OpenSSL TLS uprobe attachment. Used to measure the syscall-only
+    /// capture path independently of TLS plaintext interception.
+    #[arg(long = "disable-tls")]
+    pub disable_tls: bool,
+    /// Force stdio/MCP content capture on regardless of config. Used to measure
+    /// the fully enabled capture path.
+    #[arg(long = "enable-content-capture")]
+    pub enable_content_capture: bool,
 }
 
 pub fn install_tracing() {

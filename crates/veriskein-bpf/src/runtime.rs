@@ -26,6 +26,10 @@ pub struct BpfRuntimeConfig {
     pub openssl_library_paths: Vec<PathBuf>,
     pub openssl_soname_allowlist: Vec<String>,
     pub ringbuf_size: usize,
+    /// When false, the OpenSSL TLS uprobes are not attached. This isolates the
+    /// syscall-only capture path (e.g. for the performance harness `kernel-only`
+    /// mode) from the cost of TLS plaintext interception.
+    pub tls_enabled: bool,
 }
 
 impl Default for BpfRuntimeConfig {
@@ -34,6 +38,7 @@ impl Default for BpfRuntimeConfig {
             openssl_library_paths: Vec::new(),
             openssl_soname_allowlist: vec!["libssl.so.3".to_string(), "libssl.so.1.1".to_string()],
             ringbuf_size: veriskein_proto::defaults::RINGBUF_SIZE_TOTAL,
+            tls_enabled: true,
         }
     }
 }
@@ -97,7 +102,11 @@ impl RuntimeEventSource {
         let (command_tx, command_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
-        let openssl_libraries = discover_openssl_libraries(&config)?;
+        let openssl_libraries = if config.tls_enabled {
+            discover_openssl_libraries(&config)?
+        } else {
+            Vec::new()
+        };
 
         let worker = thread::Builder::new()
             .name("veriskein-bpf".to_string())

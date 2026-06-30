@@ -32,7 +32,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     preflight(&cli)?;
     let config_root = resolve_config_root()?;
     let bpf_config = load_bpf_runtime_config(&config_root, &cli)?;
-    let content_capture = load_content_capture_settings(&config_root)?;
+    let content_capture = load_content_capture_settings(&config_root, &cli)?;
     let source = RuntimeEventSource::start_with_config(bpf_config.clone())
         .context("start BPF event source")?;
     let sink = open_sink(cli.alert_output.as_deref()).context("open alert sink")?;
@@ -137,6 +137,7 @@ fn load_bpf_runtime_config(config_root: &Path, cli: &Cli) -> Result<BpfRuntimeCo
     if let Some(ringbuf_size) = cli.ringbuf_size {
         config.ringbuf_size = ringbuf_size;
     }
+    config.tls_enabled = !cli.disable_tls;
     Ok(config)
 }
 
@@ -147,14 +148,19 @@ fn load_ipc_config(config_root: &Path) -> Result<IpcSettings> {
     Ok(ipc_settings_from_defaults(defaults))
 }
 
-fn load_content_capture_settings(config_root: &Path) -> Result<ContentCaptureSettings> {
-    let Some(defaults) = load_defaults_config(config_root)? else {
-        return Ok(ContentCaptureSettings::default());
+fn load_content_capture_settings(config_root: &Path, cli: &Cli) -> Result<ContentCaptureSettings> {
+    let mut settings = match load_defaults_config(config_root)? {
+        Some(defaults) => ContentCaptureSettings {
+            stdio_enabled: defaults.content_capture.stdio,
+            mcp_stdio_enabled: defaults.content_capture.mcp_stdio,
+        },
+        None => ContentCaptureSettings::default(),
     };
-    Ok(ContentCaptureSettings {
-        stdio_enabled: defaults.content_capture.stdio,
-        mcp_stdio_enabled: defaults.content_capture.mcp_stdio,
-    })
+    if cli.enable_content_capture {
+        settings.stdio_enabled = true;
+        settings.mcp_stdio_enabled = true;
+    }
+    Ok(settings)
 }
 
 fn load_defaults_config(config_root: &Path) -> Result<Option<DefaultsConfig>> {
@@ -705,6 +711,8 @@ mod tests {
                         ringbuf_size: None,
                         ipc_sock: None,
                         no_ipc: true,
+                        disable_tls: false,
+                        enable_content_capture: false,
                     },
                     config_root: config_root(),
                     content_capture: super::ContentCaptureSettings::default(),
