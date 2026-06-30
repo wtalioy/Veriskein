@@ -1,10 +1,17 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct BoundedMap<K, V> {
-    entries: BTreeMap<K, V>,
-    order: VecDeque<K>,
+    entries: BTreeMap<K, Entry<V>>,
+    order: BTreeMap<u64, K>,
     capacity: usize,
+    next_seq: u64,
+}
+
+#[derive(Debug, Clone)]
+struct Entry<V> {
+    value: V,
+    seq: u64,
 }
 
 impl<K, V> BoundedMap<K, V>
@@ -14,8 +21,9 @@ where
     pub fn new(capacity: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
-            order: VecDeque::new(),
             capacity,
+            order: BTreeMap::new(),
+            next_seq: 0,
         }
     }
 
@@ -24,56 +32,93 @@ where
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
-        self.entries.get(key)
+        self.entries.get(key).map(|entry| &entry.value)
     }
 
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        self.entries.get_mut(key)
+        self.entries.get_mut(key).map(|entry| &mut entry.value)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.entries.iter()
+        self.entries.iter().map(|(key, entry)| (key, &entry.value))
     }
 
     pub fn values(&self) -> impl Iterator<Item = &V> {
-        self.entries.values()
+        self.entries.values().map(|entry| &entry.value)
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Vec<(K, V)> {
-        self.remove_order_entry(&key);
-        self.order.push_back(key.clone());
-        self.entries.insert(key, value);
+        if let Some(existing) = self.entries.remove(&key) {
+            self.order.remove(&existing.seq);
+        }
+        let seq = self.reserve_seq();
+        self.order.insert(seq, key.clone());
+        self.entries.insert(key, Entry { value, seq });
         self.evict_over_capacity()
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        self.remove_order_entry(key);
-        self.entries.remove(key)
+        let entry = self.entries.remove(key)?;
+        self.order.remove(&entry.seq);
+        Some(entry.value)
     }
 
     pub fn retain<F>(&mut self, mut keep: F)
     where
         F: FnMut(&K, &mut V) -> bool,
     {
-        self.entries.retain(|key, value| keep(key, value));
-        self.order.retain(|key| self.entries.contains_key(key));
+        let mut removed = Vec::new();
+        self.entries.retain(|key, entry| {
+            let keep_entry = keep(key, &mut entry.value);
+            if !keep_entry {
+                removed.push(entry.seq);
+            }
+            keep_entry
+        });
+        for seq in removed {
+            self.order.remove(&seq);
+        }
     }
 
     fn evict_over_capacity(&mut self) -> Vec<(K, V)> {
         let mut evicted = Vec::new();
         while self.entries.len() > self.capacity {
-            let Some(key) = self.order.pop_front() else {
+            let Some((seq, key)) = self
+                .order
+                .first_key_value()
+                .map(|(seq, key)| (*seq, key.clone()))
+            else {
                 break;
             };
-            if let Some(value) = self.entries.remove(&key) {
-                evicted.push((key, value));
+            self.order.remove(&seq);
+            if let Some(entry) = self.entries.remove(&key) {
+                evicted.push((key, entry.value));
             }
         }
         evicted
     }
 
-    fn remove_order_entry(&mut self, key: &K) {
-        self.order.retain(|existing| existing != key);
+    fn reserve_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        if self.next_seq == 0 {
+            self.resequence();
+        }
+        seq
+    }
+
+    fn resequence(&mut self) {
+        let mut seq = 0_u64;
+        let mut new_order = BTreeMap::new();
+        for (_, key) in std::mem::take(&mut self.order) {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.seq = seq;
+                new_order.insert(seq, key);
+                seq = seq.saturating_add(1);
+            }
+        }
+        self.order = new_order;
+        self.next_seq = seq;
     }
 }
 
