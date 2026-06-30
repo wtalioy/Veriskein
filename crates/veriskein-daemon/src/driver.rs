@@ -138,6 +138,7 @@ fn load_bpf_runtime_config(config_root: &Path, cli: &Cli) -> Result<BpfRuntimeCo
         config.ringbuf_size = ringbuf_size;
     }
     config.tls_enabled = !cli.disable_tls;
+    config.content_io_enabled = !cli.disable_content_io;
     Ok(config)
 }
 
@@ -559,6 +560,16 @@ where
         }
     }
     source.shutdown().context("stop event source")?;
+    // Emit final cumulative counters so external harnesses (e.g. the perf
+    // benchmark) can record real events/drops totals for a run instead of
+    // sampling the 1 Hz rate log.
+    let final_counters = pipeline.collector_counters();
+    info!(
+        raw_events_total = final_counters.raw_events_total,
+        emitted_events_total = final_counters.emitted_events_total,
+        reorder_or_drop_total = final_counters.reorder_or_drop_total,
+        "veriskein final counters"
+    );
     if let Some(ipc) = config.ipc {
         ipc.shutdown().await;
     }
@@ -712,6 +723,7 @@ mod tests {
                         ipc_sock: None,
                         no_ipc: true,
                         disable_tls: false,
+                        disable_content_io: false,
                         enable_content_capture: false,
                     },
                     config_root: config_root(),

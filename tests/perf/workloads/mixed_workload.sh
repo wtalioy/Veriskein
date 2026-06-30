@@ -22,6 +22,7 @@ ITERS="${PERF_ITERS:-8}"
 FUNCS="${PERF_FUNCS:-1500}"
 TLS_REQS="${PERF_TLS_REQS:-12}"
 TLS_PORT="${PERF_TLS_PORT:-}"
+STDIO_LINES="${PERF_STDIO_LINES:-20000}"
 SCRATCH="${PERF_SCRATCH:-$(mktemp -d)}"
 CC="${CC:-cc}"
 
@@ -62,4 +63,23 @@ if [[ -n "${TLS_PORT}" ]]; then
       | openssl s_client -connect "127.0.0.1:${TLS_PORT}" -quiet 2>/dev/null >/dev/null \
       || true
   done
+fi
+
+# stdio path: emit a bounded volume directly to this process's own stdout (fd 1)
+# and drain its own stdin (fd 0) using shell builtins (no child process or pipe
+# subshell), so the read()/write() syscalls land on THIS process's fds 0/1/2.
+# When this workload is the agent-seeded process and the daemon has content
+# capture enabled (full mode), fds 0/1/2 are whitelisted and these bytes flow
+# through the content_io capture path. In other modes the identical syscalls
+# happen but are not captured, keeping the workload byte-for-byte the same.
+if (( STDIO_LINES > 0 )); then
+  for ((i = 0; i < STDIO_LINES; i++)); do
+    printf 'veriskein-perf stdio line %d payload aaaaaaaaaaaaaaaaaaaaaaaa\n' "${i}"
+  done
+fi
+
+# Drain provided stdin via the builtin (reads on fd 0 of this process). The
+# harness feeds a finite file, so this terminates at EOF.
+if [[ ! -t 0 ]]; then
+  while IFS= read -r _; do :; done || true
 fi

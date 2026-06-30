@@ -30,6 +30,11 @@ pub struct BpfRuntimeConfig {
     /// syscall-only capture path (e.g. for the performance harness `kernel-only`
     /// mode) from the cost of TLS plaintext interception.
     pub tls_enabled: bool,
+    /// When false, the `content_io` stdio/pipe read/write tracepoints are not
+    /// attached at all. This lets the performance harness measure a true
+    /// "proc/fs/net only" path, since the tracepoints carry per-syscall cost
+    /// even when the capture whitelist is empty.
+    pub content_io_enabled: bool,
 }
 
 impl Default for BpfRuntimeConfig {
@@ -39,6 +44,7 @@ impl Default for BpfRuntimeConfig {
             openssl_soname_allowlist: vec!["libssl.so.3".to_string(), "libssl.so.1.1".to_string()],
             ringbuf_size: veriskein_proto::defaults::RINGBUF_SIZE_TOTAL,
             tls_enabled: true,
+            content_io_enabled: true,
         }
     }
 }
@@ -124,8 +130,14 @@ impl RuntimeEventSource {
 
                 // Attach every program before building the ring buffer so probe
                 // activation is all-or-nothing from the daemon's perspective.
+                // TLS uprobes are attached separately below; content_io is
+                // skipped entirely when disabled so its tracepoints add no
+                // per-syscall cost.
                 for (index, loaded) in objects.iter_mut().enumerate() {
                     if index == tls_index {
+                        continue;
+                    }
+                    if index == content_io_index && !config.content_io_enabled {
                         continue;
                     }
                     for program in loaded.object.progs_mut() {

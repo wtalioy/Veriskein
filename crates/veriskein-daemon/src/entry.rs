@@ -27,6 +27,10 @@ pub struct Cli {
     /// capture path independently of TLS plaintext interception.
     #[arg(long = "disable-tls")]
     pub disable_tls: bool,
+    /// Skip attaching the content_io stdio/pipe read/write tracepoints entirely.
+    /// Used to measure a true proc/fs/net-only path.
+    #[arg(long = "disable-content-io")]
+    pub disable_content_io: bool,
     /// Force stdio/MCP content capture on regardless of config. Used to measure
     /// the fully enabled capture path.
     #[arg(long = "enable-content-capture")]
