@@ -90,16 +90,21 @@ The IPC wire format is newline-delimited JSON with a flat `kind` discriminator. 
 `tests/perf/run.sh` measures the monitor's overhead against the competition's
 "<= 5% data-capture overhead" target by running one fixed workload under
 `baseline` / `kernel-only` / `kernel+tls` / `full` and comparing wall-clock time.
-See `tests/perf/README.md` for methodology.
+Modes are isolated by real daemon flags (`--disable-tls` / `--disable-content-io`
+/ `--enable-content-capture`), the workload runs under an agent-seeded wrapper so
+`full` exercises *real* stdio content capture, and passes are interleaved and
+aggregated by median to remove ordering drift. See `tests/perf/README.md`.
 
 ```bash
 cargo build --release -p veriskein-daemon -p veriskein-perf
 sudo env PERF_SKIP_BUILD=1 SUDO= PERF_PROFILE=release bash tests/perf/run.sh
 ```
 
-On record (Linux 6.6 / WSL2, 8 vCPU, representative workload), capture overhead
-is kernel-only +0.29%, kernel+tls +0.57%, full +1.43% with daemon RSS ~180 MiB;
-results are written to `artifacts/perf-real/`.
+On record (Linux 6.6 / WSL2, 8 vCPU, representative workload, `artifacts/perf-real/`):
+kernel-only **+2.18%**, kernel+tls **+2.27%** (the core syscall+TLS capture loss,
+strictly gated <= 5%), full **+4.04%** (real stdio/MCP content capture, reported
+informationally as its cost scales with captured content throughput); daemon RSS
+~180–210 MiB. Per-mode `*.daemon.log` records the real captured-event/drop counts.
 
 ### Manual report rendering
 
@@ -140,10 +145,10 @@ The report input can be either a full `PerfReport` JSON object or a map from mod
 
 ## Design Docs
 
-The detailed implementation plan lives in `impl_docs/`, especially:
+The consolidated design document is `docs/设计方案文档.md` (design rationale,
+implementation, code walkthrough, problems & solutions, third-party sources, and
+AI-usage disclosure). Companion material lives under `docs/`:
 
-- `impl_docs/04_prompt_and_provenance.md`
-- `impl_docs/05_detectors.md`
-- `impl_docs/06_alerts.md`
-- `impl_docs/07_tests_and_perf.md`
-- `impl_docs/10_phase_issue_breakdown.md`
+- `docs/对比分析_功能性能创新性.md` — feature/performance/innovation comparison
+- `docs/开发进度与完成情况.md` — development progress and completion status
+- `docs/AI_USAGE.md` and `docs/ai-interactions/` — AI usage disclosure and logs
