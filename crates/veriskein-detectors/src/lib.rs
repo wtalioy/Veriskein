@@ -16,4 +16,6 @@ pub use finding::{
     Finding, FindingEvidence, FindingHealth, FindingObjects, FindingType, PromptEvidenceState,
     VisibilityState,
 };
-pub use mcp::detect_mcp_tool_spoofing;
+pub use mcp::{
+    McpAnomalyContext, detect_mcp_tool_spoofing, mcp_tool_spoofing_findings_from_content,
+};

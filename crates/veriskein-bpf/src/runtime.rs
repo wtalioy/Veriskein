@@ -66,6 +66,17 @@ pub struct FdCapturePolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+struct FdStreamKey {
+    tgid: u32,
+    fd: i32,
+    channel: u8,
+    direction: u8,
+    _pad0: u16,
+    _pad1: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentIoCommand {
     Upsert {
         key: FdCaptureKey,
@@ -296,21 +307,49 @@ fn drain_content_io_commands(
 }
 
 fn apply_content_io_command(object: &mut Object, command: ContentIoCommand) -> Result<()> {
-    let map = object
+    let whitelist = object
         .maps()
         .find(|map| map.name().to_string_lossy() == "fd_capture_whitelist")
         .context("find content_io fd_capture_whitelist map")?;
+    let offsets = object
+        .maps()
+        .find(|map| map.name().to_string_lossy() == "fd_stream_offsets")
+        .context("find content_io fd_stream_offsets map")?;
     match command {
-        ContentIoCommand::Upsert { key, policy } => map
-            .update(as_bytes(&key), as_bytes(&policy), MapFlags::ANY)
-            .context("update content_io fd_capture_whitelist"),
+        ContentIoCommand::Upsert { key, policy } => {
+            reset_fd_stream_offsets(&offsets, key);
+            whitelist
+                .update(as_bytes(&key), as_bytes(&policy), MapFlags::ANY)
+                .context("update content_io fd_capture_whitelist")
+        }
         ContentIoCommand::Delete { key } => {
-            if let Err(err) = map.delete(as_bytes(&key)) {
+            reset_fd_stream_offsets(&offsets, key);
+            if let Err(err) = whitelist.delete(as_bytes(&key)) {
                 if !err.to_string().contains("No such file") {
                     return Err(err).context("delete content_io fd_capture_whitelist entry");
                 }
             }
             Ok(())
+        }
+    }
+}
+
+fn reset_fd_stream_offsets(map: &impl MapCore, key: FdCaptureKey) {
+    for channel in [
+        ContentChannel::Stdio as u8,
+        ContentChannel::Pipe as u8,
+        ContentChannel::Mcp as u8,
+    ] {
+        for direction in [1_u8, 2_u8] {
+            let stream_key = FdStreamKey {
+                tgid: key.tgid,
+                fd: key.fd,
+                channel,
+                direction,
+                _pad0: 0,
+                _pad1: 0,
+            };
+            let _ = map.delete(as_bytes(&stream_key));
         }
     }
 }

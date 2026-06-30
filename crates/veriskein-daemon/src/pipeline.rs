@@ -15,13 +15,18 @@ use veriskein_correlator::{
     CapiState, ChainRiskKind, FileEventInput, InjectionKeywordConfig, PromptEvidence, PromptInput,
     PromptStore,
 };
-use veriskein_detectors::{DetectorEngine, Finding, detect_cross_agent_prompt_injection};
+use veriskein_detectors::{
+    DetectorEngine, Finding, McpAnomalyContext, detect_cross_agent_prompt_injection,
+    mcp_tool_spoofing_findings_from_content,
+};
 use veriskein_graph::{AgentConfig, Attribution, EnvEvidence, GraphState, LlmEndpointResolver};
 use veriskein_normalizer::{
     NormalizedData, NormalizedEvent, Normalizer, ProcessSnapshot, SensitiveConfig,
     file_access_mode, load_workspaces,
 };
-use veriskein_proto::{ContentChannel, OwnedContentFragEvent, OwnedEvent, Role, defaults};
+use veriskein_proto::{
+    ContentChannel, EventId, OwnedContentFragEvent, OwnedEvent, Role, defaults, parse_c_string,
+};
 use veriskein_state_net::StateNet;
 
 use crate::enrich::{enrich_event_from_procfs, env_evidence_for_pid};
@@ -45,6 +50,7 @@ pub struct RuntimePipeline {
     runtime_health: RuntimeHealth,
     last_endpoint_refresh: Instant,
     content_capture: ContentCaptureSettings,
+    active_content_capture: BTreeMap<(u32, i32), ActiveContentCapture>,
     content_capture_updates: Vec<ContentCaptureUpdate>,
     ipc_events: Vec<IpcEventProjection>,
     ipc_graph: Vec<IpcGraphProjection>,
@@ -68,6 +74,12 @@ pub(crate) enum ContentCaptureUpdate {
         pid: u32,
         fd: i32,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveContentCapture {
+    channel: ContentChannel,
+    expires_at_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,6 +145,7 @@ impl RuntimePipeline {
             runtime_health: RuntimeHealth::full(),
             last_endpoint_refresh: Instant::now(),
             content_capture,
+            active_content_capture: BTreeMap::new(),
             content_capture_updates: Vec::new(),
             ipc_events: Vec::new(),
             ipc_graph: Vec::new(),
@@ -157,7 +170,18 @@ impl RuntimePipeline {
         for mut collected in events {
             enrich_event_from_procfs(&mut collected.event);
             match &collected.event {
-                OwnedEvent::ContentFrag(evt) => self.process_content_fragment(evt),
+                OwnedEvent::ContentFrag(evt) => {
+                    for finding in self.process_content_fragment(collected.ingest_seq, evt) {
+                        if let Some(alert) = emit_finding(
+                            &mut self.alert_throttler,
+                            sink,
+                            &finding,
+                            &self.runtime_health,
+                        )? {
+                            emitted.push(alert);
+                        }
+                    }
+                }
                 _ => {
                     emitted.extend(self.process_owned_event(
                         collected.ingest_seq,
@@ -188,8 +212,18 @@ impl RuntimePipeline {
     ) -> Result<Vec<AlertRecord>> {
         match event {
             OwnedEvent::ContentFrag(evt) => {
-                self.process_content_fragment(evt);
-                Ok(Vec::new())
+                let mut emitted = Vec::new();
+                for finding in self.process_content_fragment(ingest_seq, evt) {
+                    if let Some(alert) = emit_finding(
+                        &mut self.alert_throttler,
+                        sink,
+                        &finding,
+                        &self.runtime_health,
+                    )? {
+                        emitted.push(alert);
+                    }
+                }
+                Ok(emitted)
             }
             _ => self.process_owned_event(ingest_seq, event, sink, dry_run),
         }
@@ -232,13 +266,47 @@ impl RuntimePipeline {
         self.last_endpoint_refresh = Instant::now();
     }
 
-    fn process_content_fragment(&mut self, evt: &OwnedContentFragEvent) {
-        self.observe_mcp_registry(evt);
+    fn process_content_fragment(
+        &mut self,
+        ingest_seq: u64,
+        evt: &OwnedContentFragEvent,
+    ) -> Vec<Finding> {
+        let mcp_anomalies = self.observe_mcp_registry(evt);
         for prompt in handle_content_fragment(evt, &self.graph, &self.state_net, &mut self.content)
         {
             self.observe_extracted_prompt(evt.header.pid, evt.header.ts_ns, prompt);
         }
         self.evict_pending_prompts(evt.header.ts_ns);
+        if mcp_anomalies.is_empty() {
+            return Vec::new();
+        }
+        let pid = evt.header.pid;
+        let tid = evt.header.tid;
+        let ts_ns = evt.header.ts_ns;
+        let ssl_ctx = evt.ssl_ctx;
+        let comm = parse_c_string(&evt.header.comm);
+        let Some(binding) = self.graph.resolve(pid) else {
+            self.pending_mcp_anomalies
+                .entry(pid)
+                .or_default()
+                .extend(mcp_anomalies);
+            return Vec::new();
+        };
+        mcp_tool_spoofing_findings_from_content(
+            McpAnomalyContext {
+                ts_ns,
+                pid,
+                tid,
+                event_id: EventId::from_seed(format!("mcp:{pid}:{ssl_ctx}:{ts_ns}").as_bytes())
+                    .hex(),
+                ingest_seq,
+                argv: Vec::new(),
+                process_comm: comm,
+                process_binary: String::new(),
+            },
+            binding,
+            &mcp_anomalies,
+        )
     }
 
     fn process_owned_event(
@@ -309,30 +377,88 @@ impl RuntimePipeline {
 
     fn observe_content_capture_policy(&mut self, normalized: &NormalizedEvent) {
         match &normalized.data {
+            NormalizedData::ProcFork { child_pid, .. } => {
+                self.inherit_content_capture(normalized.process.pid, *child_pid)
+            }
             NormalizedData::ProcExec { .. } => self.maybe_enable_standard_fds(normalized),
             NormalizedData::ProcExit { .. } => {
-                for fd in 0..=2 {
-                    self.content_capture_updates
-                        .push(ContentCaptureUpdate::Delete {
-                            pid: normalized.process.pid,
-                            fd,
-                        });
-                }
+                self.delete_all_content_capture(normalized.process.pid)
             }
             NormalizedData::FdDup {
                 oldfd,
                 newfd,
+                dup_ret: 0,
+            } if *oldfd < 0 => self.delete_content_capture(normalized.process.pid, *newfd),
+            NormalizedData::FdDup {
+                oldfd,
+                newfd,
                 dup_ret,
-            } => {
-                if *oldfd < 0 && *dup_ret == 0 {
-                    self.content_capture_updates
-                        .push(ContentCaptureUpdate::Delete {
-                            pid: normalized.process.pid,
-                            fd: *newfd,
-                        });
-                }
+            } if *dup_ret >= 0 => {
+                self.dup_content_capture(normalized.process.pid, *oldfd, *newfd, *dup_ret)
+            }
+            NormalizedData::FileOpen { ret_fd, .. } if *ret_fd >= 0 => {
+                self.delete_content_capture(normalized.process.pid, *ret_fd)
             }
             _ => {}
+        }
+    }
+
+    fn inherit_content_capture(&mut self, parent_pid: u32, child_pid: u32) {
+        let inherited = self
+            .active_content_capture
+            .iter()
+            .filter_map(|(&(pid, fd), policy)| (pid == parent_pid).then_some((fd, *policy)))
+            .collect::<Vec<_>>();
+        for (fd, policy) in inherited {
+            self.upsert_content_capture(child_pid, fd, policy.channel, policy.expires_at_ns);
+        }
+    }
+
+    fn dup_content_capture(&mut self, pid: u32, oldfd: i32, newfd: i32, dup_ret: i32) {
+        let destination = if newfd >= 0 { newfd } else { dup_ret };
+        self.delete_content_capture(pid, destination);
+        if let Some(policy) = self.active_content_capture.get(&(pid, oldfd)).copied() {
+            self.upsert_content_capture(pid, destination, policy.channel, policy.expires_at_ns);
+        }
+    }
+
+    fn upsert_content_capture(
+        &mut self,
+        pid: u32,
+        fd: i32,
+        channel: ContentChannel,
+        expires_at_ns: u64,
+    ) {
+        self.active_content_capture.insert(
+            (pid, fd),
+            ActiveContentCapture {
+                channel,
+                expires_at_ns,
+            },
+        );
+        self.content_capture_updates
+            .push(ContentCaptureUpdate::Upsert {
+                pid,
+                fd,
+                channel,
+                expires_at_ns,
+            });
+    }
+
+    fn delete_content_capture(&mut self, pid: u32, fd: i32) {
+        self.active_content_capture.remove(&(pid, fd));
+        self.content_capture_updates
+            .push(ContentCaptureUpdate::Delete { pid, fd });
+    }
+
+    fn delete_all_content_capture(&mut self, pid: u32) {
+        let fds = self
+            .active_content_capture
+            .keys()
+            .filter_map(|(entry_pid, fd)| (*entry_pid == pid).then_some(*fd))
+            .collect::<Vec<_>>();
+        for fd in fds {
+            self.delete_content_capture(pid, fd);
         }
     }
 
@@ -351,19 +477,13 @@ impl RuntimePipeline {
             .ts_ns
             .saturating_add(defaults::secs_to_ns(defaults::SESSION_DRAIN_SECS));
         for fd in 0..=2 {
-            self.content_capture_updates
-                .push(ContentCaptureUpdate::Upsert {
-                    pid: normalized.process.pid,
-                    fd,
-                    channel,
-                    expires_at_ns,
-                });
+            self.upsert_content_capture(normalized.process.pid, fd, channel, expires_at_ns);
         }
     }
 
-    fn observe_mcp_registry(&mut self, evt: &OwnedContentFragEvent) {
+    fn observe_mcp_registry(&mut self, evt: &OwnedContentFragEvent) -> Vec<McpToolSpoofing> {
         if evt.channel != ContentChannel::Mcp {
-            return;
+            return Vec::new();
         }
         let pid = evt.header.pid;
         let server_id = self
@@ -371,14 +491,8 @@ impl RuntimePipeline {
             .resolve(pid)
             .map(|binding| format!("{}:{}", binding.session_id.hex(), binding.agent_id.hex()))
             .unwrap_or_else(|| format!("pid:{pid}"));
-        let anomalies = self.mcp_registry.observe_jsonrpc(server_id, &evt.data);
-        if anomalies.is_empty() {
-            return;
-        }
-        self.pending_mcp_anomalies
-            .entry(pid)
-            .or_default()
-            .extend(anomalies);
+        self.mcp_registry
+            .observe_jsonrpc_fragment(server_id, evt.ssl_ctx, &evt.data)
     }
 
     fn observe_capi_file_event(&mut self, normalized: &NormalizedEvent) {
@@ -722,7 +836,7 @@ mod tests {
     };
     use veriskein_state_net::StateNet;
 
-    use super::{PendingPrompt, RuntimePipeline, handle_content_fragment};
+    use super::{ContentCaptureUpdate, PendingPrompt, RuntimePipeline, handle_content_fragment};
 
     fn graph() -> GraphState {
         let mut graph = GraphState::new(
@@ -886,27 +1000,176 @@ mod tests {
     }
 
     #[test]
-    fn mcp_registry_anomaly_emits_on_next_normalized_event() {
+    fn content_capture_policy_tracks_fork_dup_and_exit() {
+        let mut pipeline = RuntimePipeline::new_with_content_capture(
+            &super::super::driver::resolve_config_root().expect("repo root"),
+            &["/tmp/ws".into()],
+            super::ContentCaptureSettings {
+                stdio_enabled: false,
+                mcp_stdio_enabled: true,
+            },
+        )
+        .expect("pipeline");
+        let mut sink = Vec::new();
+        pipeline
+            .process_raw_event_bytes(
+                &veriskein_proto::EventFixture::for_pid(1, 700, 1, "claude")
+                    .exec("/usr/bin/claude", &["claude", "mcp-server"]),
+                &mut sink,
+                false,
+            )
+            .expect("exec");
+        let updates = pipeline.drain_content_capture_updates();
+        assert_eq!(updates.len(), 3);
+        assert!(updates.iter().all(|update| matches!(
+            update,
+            ContentCaptureUpdate::Upsert {
+                pid: 700,
+                channel: ContentChannel::Mcp,
+                ..
+            }
+        )));
+
+        pipeline
+            .process_raw_event_bytes(
+                &veriskein_proto::EventFixture::for_pid(2, 700, 1, "claude").fork(701, 701),
+                &mut sink,
+                false,
+            )
+            .expect("fork");
+        assert!(
+            pipeline
+                .drain_content_capture_updates()
+                .iter()
+                .all(|update| {
+                    matches!(
+                        update,
+                        ContentCaptureUpdate::Upsert {
+                            pid: 701,
+                            channel: ContentChannel::Mcp,
+                            ..
+                        }
+                    )
+                })
+        );
+
+        pipeline
+            .process_raw_event_bytes(
+                &veriskein_proto::EventFixture::for_pid(3, 701, 700, "claude").dup(1, 7, 7),
+                &mut sink,
+                false,
+            )
+            .expect("dup");
+        let updates = pipeline.drain_content_capture_updates();
+        assert!(matches!(
+            updates.as_slice(),
+            [
+                ContentCaptureUpdate::Delete { pid: 701, fd: 7 },
+                ContentCaptureUpdate::Upsert {
+                    pid: 701,
+                    fd: 7,
+                    channel: ContentChannel::Mcp,
+                    ..
+                }
+            ]
+        ));
+
+        pipeline
+            .process_raw_event_bytes(
+                &veriskein_proto::EventFixture::for_pid(4, 701, 700, "claude").open(
+                    -100,
+                    7,
+                    "/tmp/reused-fd",
+                ),
+                &mut sink,
+                false,
+            )
+            .expect("open");
+        assert!(matches!(
+            pipeline.drain_content_capture_updates().as_slice(),
+            [ContentCaptureUpdate::Delete { pid: 701, fd: 7 }]
+        ));
+
+        pipeline
+            .process_raw_event_bytes(
+                &veriskein_proto::EventFixture::for_pid(5, 701, 700, "claude").exit(0),
+                &mut sink,
+                false,
+            )
+            .expect("exit");
+        assert!(
+            pipeline
+                .drain_content_capture_updates()
+                .iter()
+                .all(|update| { matches!(update, ContentCaptureUpdate::Delete { pid: 701, .. }) })
+        );
+    }
+
+    #[test]
+    fn mcp_registry_anomaly_emits_from_content_when_attributed() {
         let mut pipeline = RuntimePipeline::new(
             &super::super::driver::resolve_config_root().expect("repo root"),
             &["/tmp/ws".into()],
         )
         .expect("pipeline");
         pipeline.graph = graph();
-        pipeline.process_content_fragment(&content_event_for_pid(
-            42,
-            ContentChannel::Mcp,
-            br#"{"jsonrpc":"2.0","result":{"tools":[{"name":"read_file"}]}}"#,
-        ));
-        pipeline.process_content_fragment(&content_event_for_pid(
-            43,
-            ContentChannel::Mcp,
-            br#"{"jsonrpc":"2.0","result":{"tools":[{"name":"read_file"}]}}"#,
-        ));
+        assert!(
+            pipeline
+                .process_content_fragment(
+                    1,
+                    &content_event_for_pid(
+                        42,
+                        ContentChannel::Mcp,
+                        br#"{"jsonrpc":"2.0","result":{"tools":[{"name":"read_file"}]}}"#,
+                    ),
+                )
+                .is_empty()
+        );
+        let findings = pipeline.process_content_fragment(
+            2,
+            &content_event_for_pid(
+                43,
+                ContentChannel::Mcp,
+                br#"{"jsonrpc":"2.0","result":{"tools":[{"name":"read_file"}]}}"#,
+            ),
+        );
+
+        assert!(
+            findings.iter().any(
+                |finding| finding.finding_type == veriskein_proto::FindingType::McpToolSpoofing
+            )
+        );
+        assert!(pipeline.pending_mcp_anomalies.get(&43).is_none());
+    }
+
+    #[test]
+    fn unattributed_mcp_registry_anomaly_emits_on_next_normalized_event() {
+        let mut pipeline = RuntimePipeline::new(
+            &super::super::driver::resolve_config_root().expect("repo root"),
+            &["/tmp/ws".into()],
+        )
+        .expect("pipeline");
+        pipeline.graph = graph();
+        pipeline.process_content_fragment(
+            1,
+            &content_event_for_pid(
+                42,
+                ContentChannel::Mcp,
+                br#"{"jsonrpc":"2.0","result":{"tools":[{"name":"read_file"}]}}"#,
+            ),
+        );
+        pipeline.process_content_fragment(
+            2,
+            &content_event_for_pid(
+                99,
+                ContentChannel::Mcp,
+                br#"{"jsonrpc":"2.0","result":{"tools":[{"name":"read_file"}]}}"#,
+            ),
+        );
         assert_eq!(
             pipeline
                 .pending_mcp_anomalies
-                .get(&43)
+                .get(&99)
                 .map(Vec::len)
                 .unwrap_or_default(),
             1
@@ -914,7 +1177,7 @@ mod tests {
 
         let mut sink = Vec::new();
         let alerts = pipeline
-            .process_replay_event(2, &proc_exec_event(43), &mut sink, false)
+            .process_replay_event(3, &proc_exec_event(99), &mut sink, false)
             .expect("process event");
 
         assert!(

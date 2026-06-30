@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
+use veriskein_retention::BoundedMap;
+
+const MAX_MCP_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_MCP_BUFFERS: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolRegistration {
@@ -16,9 +20,19 @@ pub struct McpToolSpoofing {
     pub reason: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct McpRegistry {
     owners_by_tool: BTreeMap<String, McpToolRegistration>,
+    pending_by_stream: BoundedMap<(String, u64), Vec<u8>>,
+}
+
+impl Default for McpRegistry {
+    fn default() -> Self {
+        Self {
+            owners_by_tool: BTreeMap::new(),
+            pending_by_stream: BoundedMap::new(MAX_MCP_BUFFERS),
+        }
+    }
 }
 
 impl McpRegistry {
@@ -36,6 +50,28 @@ impl McpRegistry {
             return Vec::new();
         };
         self.observe_tools(server_id, tool_names_from_value(&value))
+    }
+
+    pub fn observe_jsonrpc_fragment(
+        &mut self,
+        server_id: impl Into<String>,
+        stream_id: u64,
+        payload: &[u8],
+    ) -> Vec<McpToolSpoofing> {
+        let server_id = server_id.into();
+        let key = (server_id.clone(), stream_id);
+        let mut buffered = self.pending_by_stream.remove(&key).unwrap_or_default();
+        buffered.extend_from_slice(payload);
+        if buffered.len() > MAX_MCP_MESSAGE_BYTES {
+            return Vec::new();
+        }
+        match serde_json::from_slice::<Value>(&buffered) {
+            Ok(value) => self.observe_tools(server_id, tool_names_from_value(&value)),
+            Err(_) => {
+                self.pending_by_stream.insert(key, buffered);
+                Vec::new()
+            }
+        }
     }
 
     pub fn observe_tools(
@@ -122,5 +158,29 @@ mod tests {
         assert_eq!(anomalies[0].claimed_server, "browser");
         assert_eq!(anomalies[0].registered_server, "filesystem");
         assert_eq!(anomalies[0].reason, "mcp_tool_name_collision");
+    }
+
+    #[test]
+    fn split_jsonrpc_tools_list_is_reassembled_by_stream() {
+        let mut registry = McpRegistry::new();
+        assert!(
+            registry
+                .observe_jsonrpc_fragment(
+                    "filesystem",
+                    1,
+                    br#"{"jsonrpc":"2.0","result":{"tools":["#
+                )
+                .is_empty()
+        );
+        assert!(
+            registry
+                .observe_jsonrpc_fragment("filesystem", 1, br#"{"name":"read_file"}]}}"#)
+                .is_empty()
+        );
+
+        let anomalies =
+            registry.observe_jsonrpc("browser", br#"{"result":{"tools":[{"name":"read_file"}]}}"#);
+
+        assert_eq!(anomalies.len(), 1);
     }
 }

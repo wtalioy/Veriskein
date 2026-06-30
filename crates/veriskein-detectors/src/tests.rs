@@ -4,7 +4,7 @@ use veriskein_normalizer::{
     NormalizedData, NormalizedEvent, PathContext, PathResolution, PathResolutionMode, PathVerdict,
     ProcessSnapshot, WorkspaceRef,
 };
-use veriskein_proto::{EventKind, defaults};
+use veriskein_proto::{ContentChannel, EventKind, defaults};
 
 use veriskein_correlator::{PromptEvidence, PromptEvidenceKind};
 
@@ -598,6 +598,7 @@ fn prompt_repeat_can_enhance_deadloop_without_file_repeat() {
         prompt_id: "prompt-1".to_string(),
         ingest_seq: 1,
         visibility_state: veriskein_proto::VisibilityState::Full,
+        capture_mode: ContentChannel::Tls,
         kind: PromptEvidenceKind::RepeatedPrompt { count: 5 },
     }];
     let mut findings = Vec::new();
@@ -633,6 +634,7 @@ fn repeated_prompt_signal_does_not_attach_to_base_findings() {
         prompt_id: "prompt-1".to_string(),
         ingest_seq: 1,
         visibility_state: veriskein_proto::VisibilityState::Full,
+        capture_mode: ContentChannel::Tls,
         kind: PromptEvidenceKind::RepeatedPrompt { count: 5 },
     }];
 
@@ -684,6 +686,6 @@ fn mcp_tool_spoofing_anomaly_emits_finding() {
 
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].finding_type, FindingType::McpToolSpoofing);
-    assert_eq!(findings[0].evidence[0].kind, "mcp_registry");
+    assert_eq!(findings[0].evidence[0].kind, "heuristic");
     assert_eq!(findings[0].evidence[0].op.as_deref(), Some("read_file"));
 }

@@ -143,7 +143,7 @@ static __always_inline int emit_fd_content(struct fd_capture_key *key,
     fill_header(&seqs, &evt->header, EVT_CONTENT_FRAG, sizeof(*evt), 0);
     evt->ssl_ctx = fd_stream_handle(key->tgid, key->fd, policy->channel);
     evt->stream_offset =
-        reserve_fd_stream_offset(key->tgid, key->fd, policy->channel, direction, (__u32)len);
+        reserve_fd_stream_offset(key->tgid, key->fd, policy->channel, direction, frag_len);
     evt->byte_len = (__u32)len;
     evt->frag_len = frag_len;
     evt->channel = policy->channel;
