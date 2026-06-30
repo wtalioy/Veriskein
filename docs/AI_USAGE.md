@@ -72,5 +72,4 @@
     降级诚实和 IPC 加固相关记录。
   - `docs/ai-interactions/2026-06-30-submission-verification-and-perf.md`：提交前测试验证、
     性能基准检查、Phase 6 进度、材料缺口和 AI 披露整理相关记录。
-  - `docs/ai-interactions/redaction-notes.md`：交互记录脱敏规则。
 - git 提交记录体现了项目功能迭代过程；AI 使用情况以本文档和 `docs/ai-interactions/` 为准。
