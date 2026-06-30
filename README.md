@@ -85,6 +85,24 @@ The IPC wire format is newline-delimited JSON with a flat `kind` discriminator. 
 
 ## Performance Reports
 
+### Capture-overhead benchmark (live)
+
+`tests/perf/run.sh` measures the monitor's overhead against the competition's
+"<= 5% data-capture overhead" target by running one fixed workload under
+`baseline` / `kernel-only` / `kernel+tls` / `full` and comparing wall-clock time.
+See `tests/perf/README.md` for methodology.
+
+```bash
+cargo build --release -p veriskein-daemon -p veriskein-perf
+sudo env PERF_SKIP_BUILD=1 SUDO= PERF_PROFILE=release bash tests/perf/run.sh
+```
+
+On record (Linux 6.6 / WSL2, 8 vCPU, representative workload), capture overhead
+is kernel-only +0.29%, kernel+tls +0.57%, full +1.43% with daemon RSS ~180 MiB;
+results are written to `artifacts/perf-real/`.
+
+### Manual report rendering
+
 Render a sample performance artifact:
 
 ```bash
